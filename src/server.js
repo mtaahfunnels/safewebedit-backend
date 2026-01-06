@@ -1,0 +1,237 @@
+/**
+ * SafeWebEdits API Server
+ * Main entry point for the Express application
+ */
+
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const { v4: uuidv4 } = require('uuid');
+
+// Import database
+const db = require('./services/database');
+
+// Import routes
+const authRoutes = require('./api/routes/auth');
+const { authenticateToken } = require("./api/routes/auth");
+const wordpressRoutes = require("./api/routes/wordpress");
+const sitesRoutes = require("./api/routes/sites"); // NEW: Universal platform support
+const slotsRoutes = require("./api/routes/slots");
+const contentRoutes = require("./api/routes/content");
+const contentEditorRoutes = require("./api/routes/content-editor");
+const visualEditorRoutes = require("./api/routes/visual-editor");
+const autoDiscoveryRoutes = require("./api/routes/auto-discovery");
+const visualProxyRoutes = require("./api/routes/visual-proxy");
+const subscriptionRoutes = require("./api/routes/subscription");
+// const googleSheetsRoutes = require("./api/routes/google-sheets");
+const passwordResetRoutes = require("./api/routes/password-reset");
+const onboardRoutes = require("./api/routes/onboard"); // NEW: Onboarding flow
+const stripeWebhookRoutes = require("./api/routes/stripe-webhook"); // NEW: Stripe webhooks
+const emailRoutes = require("./api/routes/email"); // Email inbound parse webhook
+
+// Initialize Express app
+const app = express();
+app.set("trust proxy", true);
+const PORT = process.env.PORT || 5004;
+
+// ===========================================
+// MIDDLEWARE
+// ===========================================
+
+// Security headers
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  },
+}));
+
+// CORS configuration
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS?.split(",") || ['http://localhost:3000', 'http://localhost:3001', 'https://safewebedit.com', 'https://www.safewebedit.com'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+}));
+
+// IMPORTANT: Stripe webhook must come BEFORE express.json()
+// Stripe needs raw body for signature verification
+app.use('/api/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+
+// Request parsing
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Logging
+app.use(morgan('combined'));
+
+// Request ID for tracking
+app.use((req, res, next) => {
+  req.requestId = uuidv4();
+  res.setHeader('X-Request-ID', req.requestId);
+  next();
+});
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+  validate: { trustProxy: false }, // We're behind Nginx proxy, disable validation
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', limiter);
+
+// ===========================================
+// ROUTES
+// ===========================================
+
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  const dbHealth = await db.healthCheck();
+  res.json({
+    status: 'healthy',
+    service: 'SafeWebEdits API',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    database: dbHealth,
+  });
+});
+
+// API root
+app.get('/api', (req, res) => {
+  res.json({
+    service: 'SafeWebEdits API',
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      auth: {
+        login: 'POST /api/auth/login',
+        profile: 'GET /api/auth/profile',
+      },
+      onboard: {
+        start: 'POST /api/onboard',
+        status: 'GET /api/onboard/session/:sessionId',
+      },
+      sites: {
+        list: 'GET /api/sites',
+        connect: 'POST /api/sites/connect',
+        details: 'GET /api/sites/:siteId',
+        detectSections: 'POST /api/sites/:siteId/detect-sections',
+        updateContent: 'POST /api/sites/:siteId/update-content',
+        disconnect: 'DELETE /api/sites/:siteId',
+      },
+      wordpress: {
+        list: 'GET /api/wordpress',
+        connect: 'POST /api/wordpress/connect',
+      },
+    },
+  });
+});
+
+// Auth routes
+app.use('/api/auth', authRoutes);
+// Mount auth routes at root API level too (for frontend compatibility)
+app.use("/api", authRoutes);
+// Onboarding routes (public - no auth required)
+app.use("/api/onboard", onboardRoutes);
+
+// Sites routes (NEW - unified WordPress + Universal)
+app.use("/api/sites", authenticateToken, sitesRoutes);
+
+// WordPress routes (legacy - kept for backwards compatibility)
+app.use("/api/wordpress", authenticateToken, wordpressRoutes);
+
+// Content management routes
+app.use("/api/slots", authenticateToken, slotsRoutes);
+app.use("/api/content-editor", authenticateToken, contentEditorRoutes);
+app.use("/api/visual-proxy", visualProxyRoutes); // No auth required for proxy
+app.use("/api/visual-editor", authenticateToken, visualEditorRoutes);
+app.use("/api/auto-discovery", authenticateToken, autoDiscoveryRoutes);
+app.use("/api/content", authenticateToken, contentRoutes);
+
+// Subscription routes
+app.use("/api/subscription", authenticateToken, subscriptionRoutes);
+
+// Password reset routes
+app.use("/api/password-reset", passwordResetRoutes);
+
+// Google Sheets Integration (Service Account)
+// Email routes
+app.use("/api/email", emailRoutes);
+// app.use("/api/google-sheets", authenticateToken, googleSheetsRoutes);
+
+// ===========================================
+// ERROR HANDLING
+// ===========================================
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    path: req.path,
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('[ERROR]', {
+    requestId: req.requestId,
+    error: err.message,
+    stack: err.stack,
+  });
+
+  res.status(err.status || 500).json({
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    requestId: req.requestId,
+  });
+});
+
+// ===========================================
+// START SERVER
+// ===========================================
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log('============================================');
+  console.log('  SafeWebEdits API Server');
+  console.log('============================================');
+  console.log(`  Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`  Port: ${PORT}`);
+  console.log(`  Database: ${process.env.DATABASE_URL ? 'Connected' : 'Using default'}`);
+  console.log('============================================');
+  console.log(`  Server running at http://localhost:${PORT}`);
+  console.log(`  Health check: http://localhost:${PORT}/health`);
+  console.log('============================================');
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+    db.pool.end(() => {
+      console.log('Database pool closed');
+      process.exit(0);
+    });
+  });
+});
+
+// Serve screenshot files
+const path = require('path');
+// Serve screenshot files with CORS headers
+app.use("/screenshots", (req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  next();
+});
+app.use("/screenshots", express.static(path.join(__dirname, "../screenshots")));
