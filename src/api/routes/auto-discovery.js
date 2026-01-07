@@ -23,7 +23,7 @@ router.post('/scan', async (req, res) => {
 
     // Get WordPress site details
     const siteResult = await pool.query(
-      `SELECT id, site_url, wp_username, wp_app_password
+      `SELECT id, site_url, wp_username, wp_app_password_encrypted
        FROM wordpress_sites
        WHERE id = $1 AND organization_id = $2`,
       [siteId, organizationId]
@@ -34,10 +34,10 @@ router.post('/scan', async (req, res) => {
     }
 
     const site = siteResult.rows[0];
-    const { site_url, wp_username, wp_app_password } = site;
+    const { site_url, wp_username, wp_app_password_encrypted } = site;
 
     // Decrypt password
-    const decodedPassword = Buffer.from(wp_app_password, 'base64').toString('utf-8');
+    const decodedPassword = Buffer.from(wp_app_password_encrypted, 'base64').toString('utf-8');
     const authHeader = Buffer.from(`${wp_username}:${decodedPassword}`).toString('base64');
 
     // Fetch all pages from WordPress
@@ -176,7 +176,7 @@ router.post('/scan', async (req, res) => {
 // ===========================================
 router.post('/create-slot', async (req, res) => {
   const { organizationId } = req;
-  const { siteId, cssSelector, content, pageId, pageTitle, elementText } = req.body;
+  const { siteId, cssSelector, content, pageId, pageTitle, elementText, pageUrl } = req.body;
 
   if (!siteId || !cssSelector) {
     return res.status(400).json({ error: 'Site ID and CSS selector required' });
@@ -197,12 +197,99 @@ router.post('/create-slot', async (req, res) => {
     );
 
     if (existingSlot.rows.length > 0) {
-      console.log('[AUTO-DISCOVERY] Slot already exists:', existingSlot.rows[0].id);
+      const slot = existingSlot.rows[0];
+      console.log('[AUTO-DISCOVERY] Slot already exists:', slot.id, '- Page ID:', slot.wp_page_id);
+      
+      // If existing slot has no page ID, try to detect and update it
+      if ((!slot.wp_page_id || slot.wp_page_id === 0) && pageUrl) {
+        console.log('[AUTO-DISCOVERY] Updating existing slot with page detection...');
+        try {
+          const siteResult = await pool.query(
+            `SELECT site_url, wp_username, wp_app_password_encrypted
+             FROM wordpress_sites WHERE id = $1 AND organization_id = $2`,
+            [siteId, organizationId]
+          );
+
+          if (siteResult.rows.length > 0) {
+            const site = siteResult.rows[0];
+            const decodedPassword = Buffer.from(site.wp_app_password_encrypted, 'base64').toString('utf-8');
+            const authHeader = Buffer.from(`${site.wp_username}:${decodedPassword}`).toString('base64');
+
+            const normalizeUrl = (url) => url.replace(/^https?:\/\//,'').replace(/^www\./,'').replace(/\/+$/,'').toLowerCase();
+            const normalizedPageUrl = normalizeUrl(pageUrl);
+
+            const pagesResponse = await axios.get(`${site.site_url}/wp-json/wp/v2/pages`, {
+              headers: { 'Authorization': `Basic ${authHeader}` },
+              params: { per_page: 100, _fields: 'id,title,link' },
+              timeout: 10000
+            });
+
+            const matchingPage = pagesResponse.data.find(p => normalizeUrl(p.link) === normalizedPageUrl);
+            if (matchingPage) {
+              await pool.query(
+                `UPDATE content_slots
+                 SET wp_page_id = $1, wp_page_title = $2, section_type = $3, updated_at = NOW()
+                 WHERE id = $4`,
+                [matchingPage.id, matchingPage.title.rendered || matchingPage.title, 'page', slot.id]
+              );
+              
+              slot.wp_page_id = matchingPage.id;
+              slot.wp_page_title = matchingPage.title.rendered || matchingPage.title;
+              console.log('[AUTO-DISCOVERY] Updated existing slot with page ID:', matchingPage.id);
+            }
+          }
+        } catch (err) {
+          console.error('[AUTO-DISCOVERY] Error updating existing slot:', err.message);
+        }
+      }
+      
       return res.json({
         success: true,
-        slot: existingSlot.rows[0],
-        created: false
+        slot: slot,
+        created: false,
+        updated: slot.wp_page_id > 0
       });
+    }
+
+    // Detect page ID from URL if not provided
+    let detectedPageId = pageId || 0;
+    let detectedPageTitle = pageTitle || 'Auto-discovered';
+    let detectedSectionType = 'auto';
+
+    if (!pageId && pageUrl) {
+      console.log('[AUTO-DISCOVERY] Looking up page ID for URL:', pageUrl);
+      try {
+        const siteResult = await pool.query(
+          `SELECT site_url, wp_username, wp_app_password_encrypted
+           FROM wordpress_sites WHERE id = $1 AND organization_id = $2`,
+          [siteId, organizationId]
+        );
+
+        if (siteResult.rows.length > 0) {
+          const site = siteResult.rows[0];
+          const decodedPassword = Buffer.from(site.wp_app_password_encrypted, 'base64').toString('utf-8');
+          const authHeader = Buffer.from(`${site.wp_username}:${decodedPassword}`).toString('base64');
+
+          const normalizeUrl = (url) => url.replace(/^https?:\/\//,'').replace(/^www\./,'').replace(/\/+$/,'').toLowerCase();
+          const normalizedPageUrl = normalizeUrl(pageUrl);
+
+          const pagesResponse = await axios.get(`${site.site_url}/wp-json/wp/v2/pages`, {
+            headers: { 'Authorization': `Basic ${authHeader}` },
+            params: { per_page: 100, _fields: 'id,title,link' },
+            timeout: 10000
+          });
+
+          const matchingPage = pagesResponse.data.find(p => normalizeUrl(p.link) === normalizedPageUrl);
+          if (matchingPage) {
+            detectedPageId = matchingPage.id;
+            detectedPageTitle = matchingPage.title.rendered || matchingPage.title;
+            console.log('[AUTO-DISCOVERY] Found matching page:', detectedPageId, detectedPageTitle);
+          }
+            detectedSectionType = 'page';
+        }
+      } catch (err) {
+        console.error('[AUTO-DISCOVERY] Page detection error:', err.message);
+      }
     }
 
     // Create new slot
@@ -226,13 +313,13 @@ router.post('/create-slot', async (req, res) => {
         slotName,
         elementText ? `${elementText.substring(0, 50)}...` : 'Auto-discovered Content',
         `Auto-discovered content with selector: ${cssSelector}`,
-        pageId || 0,
-        pageTitle || 'Unknown Page',
+        detectedPageId,
+        detectedPageTitle,
         markerName,
         content || elementText || '',
         'auto_discovered',
         cssSelector,
-        'auto'
+        detectedSectionType
       ]
     );
 
@@ -259,7 +346,7 @@ router.post('/create-slot', async (req, res) => {
 // ===========================================
 router.put('/update-content', async (req, res) => {
   const { organizationId } = req;
-  const { slotId, content } = req.body;
+  const { slotId, content, pageId } = req.body;
 
   if (!slotId || !content) {
     return res.status(400).json({ error: 'Slot ID and content required' });
@@ -270,7 +357,7 @@ router.put('/update-content', async (req, res) => {
 
     // Get slot and site details
     const slotResult = await pool.query(
-      `SELECT cs.*, ws.site_url, ws.wp_username, ws.wp_app_password
+      `SELECT cs.*, ws.site_url, ws.wp_username, ws.wp_app_password_encrypted
        FROM content_slots cs
        JOIN wordpress_sites ws ON cs.wordpress_site_id = ws.id
        WHERE cs.id = $1`,
@@ -282,20 +369,104 @@ router.put('/update-content', async (req, res) => {
     }
 
     const slot = slotResult.rows[0];
-    const { site_url, wp_username, wp_app_password, wp_page_id, section_type } = slot;
+    console.log('[AUTO-DISCOVERY] Slot found - wp_page_id:', slot.wp_page_id, 'section_type:', slot.section_type);
+    // Check if this is an auto-discovered slot without page ID
+    const { wp_page_id } = slot;
+
+    // Use provided pageId if available, otherwise use slot's wp_page_id, otherwise default to 15
+    const targetPageId = pageId || wp_page_id || 15;
+    
+    // If this zone doesn't have a page ID assigned and one was provided, update it in DB
+    if ((!wp_page_id || wp_page_id === 0) && pageId) {
+      console.log('[AUTO-DISCOVERY] Assigning zone to page:', pageId);
+      await pool.query(
+        'UPDATE content_slots SET wp_page_id = $1 WHERE id = $2',
+        [pageId, slotId]
+      );
+    }
+
+    const { site_url, wp_username, wp_app_password_encrypted, section_type } = slot;
 
     // Decrypt password
-    const decodedPassword = Buffer.from(wp_app_password, 'base64').toString('utf-8');
+    const decodedPassword = Buffer.from(wp_app_password_encrypted, 'base64').toString('utf-8');
     const authHeader = Buffer.from(`${wp_username}:${decodedPassword}`).toString('base64');
 
     // Determine WordPress endpoint (page or post)
-    const endpoint = section_type === 'page' ? 'pages' : 'posts';
-    const wpUrl = `${site_url}/wp-json/wp/v2/${endpoint}/${wp_page_id}`;
+    const endpoint = (section_type === "page" || (section_type === "auto" && targetPageId > 0)) ? 'pages' : 'posts';
+    const wpUrl = `${site_url}/wp-json/wp/v2/${endpoint}/${pageId}`;
+    console.log('[AUTO-DISCOVERY] Updating WordPress - section_type:', section_type, 'endpoint:', endpoint, 'URL:', wpUrl);
 
-    // Update WordPress content
+    // CRITICAL FIX: First, fetch the current page content
+    const fetchResponse = await axios.get(wpUrl, {
+      headers: {
+        'Authorization': `Basic ${authHeader}`
+      },
+      timeout: 15000
+    });
+
+    const currentContent = fetchResponse.data.content.rendered || fetchResponse.data.content;
+    console.log('[AUTO-DISCOVERY] Current content length:', currentContent.length);
+
+    // Find and replace the specific zone content
+    const originalContent = slot.current_content || slot.original_content;
+    let updatedContent = currentContent;
+
+    if (originalContent) {
+      // Try multiple replacement strategies
+      let replaced = false;
+
+      // Strategy 1: Direct text match
+      if (currentContent.includes(originalContent)) {
+        updatedContent = currentContent.replace(originalContent, content);
+        console.log('[AUTO-DISCOVERY] Replaced zone content (exact match)');
+        replaced = true;
+      }
+
+      // Strategy 2: Match within HTML tags (e.g., <h2>text</h2>)
+      if (!replaced) {
+        const escapedOriginal = originalContent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const htmlPattern = new RegExp(`(<[^>]+>)\\s*${escapedOriginal}\\s*(</[^>]+>)`, 'gi');
+        if (htmlPattern.test(currentContent)) {
+          updatedContent = currentContent.replace(htmlPattern, `$1${content}$2`);
+          console.log('[AUTO-DISCOVERY] Replaced zone content (HTML tag match)');
+          replaced = true;
+        }
+      }
+
+      // Strategy 3: More flexible text search (strip extra whitespace)
+      if (!replaced) {
+        const normalizedOriginal = originalContent.trim().replace(/\s+/g, ' ');
+        const normalizedCurrent = currentContent.replace(/\s+/g, ' ');
+        if (normalizedCurrent.includes(normalizedOriginal)) {
+          updatedContent = currentContent.replace(originalContent.trim(), content);
+          console.log('[AUTO-DISCOVERY] Replaced zone content (normalized match)');
+          replaced = true;
+        }
+      }
+
+      if (!replaced) {
+        console.log('[AUTO-DISCOVERY] WARNING: Could not find exact match for replacement');
+        console.log('[AUTO-DISCOVERY] Original content:', originalContent.substring(0, 100));
+        // Don't append - just return error instead
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot locate content to replace',
+          message: 'The original content could not be found on the page. Please refresh and try again.'
+        });
+      }
+    } else {
+      console.log('[AUTO-DISCOVERY] ERROR: No original content stored');
+      return res.status(400).json({
+        success: false,
+        error: 'Missing original content',
+        message: 'This zone does not have original content stored. Please re-scan the page.'
+      });
+    }
+
+    // Update WordPress with complete content
     const updateResponse = await axios.post(
       wpUrl,
-      { content: content },
+      { content: updatedContent },
       {
         headers: {
           'Authorization': `Basic ${authHeader}`,
@@ -304,7 +475,6 @@ router.put('/update-content', async (req, res) => {
         timeout: 15000
       }
     );
-
     console.log('[AUTO-DISCOVERY] WordPress updated successfully');
 
     // Update slot in database
@@ -325,6 +495,7 @@ router.put('/update-content', async (req, res) => {
 
   } catch (error) {
     console.error('[AUTO-DISCOVERY] Error updating content:', error.message);
+    if (error.response) console.error('[AUTO-DISCOVERY] WordPress response:', error.response.status, error.response.data);
     res.status(500).json({
       error: 'Failed to update content',
       details: error.message

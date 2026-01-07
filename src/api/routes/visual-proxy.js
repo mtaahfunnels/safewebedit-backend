@@ -23,6 +23,83 @@ router.get('/', async (req, res) => {
     let html = response.data;
 
     // Inject enhanced click detection script
+// Add link rewriting script BEFORE clickDetectionScript
+
+// Line 26 - Insert new linkRewriteScript constant before clickDetectionScript
+const linkRewriteScript = `
+  <script>
+    (function() {
+      console.log('[Visual Proxy] Link rewriter loaded');
+      
+      // Get base site URL from proxy URL
+      const proxyUrl = window.location.href;
+      const urlMatch = proxyUrl.match(/url=([^&]+)/);
+      if (!urlMatch) {
+        console.log('[Visual Proxy] No URL param found, link rewriting disabled');
+        return;
+      }
+      
+      const baseSiteUrl = decodeURIComponent(urlMatch[1]);
+      const siteOrigin = new URL(baseSiteUrl).origin;
+      
+      console.log('[Visual Proxy] Base site:', siteOrigin);
+      
+      // Intercept ALL clicks in capture phase (before edit zone detection)
+      document.addEventListener('click', function(e) {
+        const link = e.target.closest('a');
+        if (!link) return; // Not a link, let edit zone detection handle it
+        
+        const href = link.getAttribute('href');
+        if (!href) return;
+        
+        // Skip anchors, javascript, mailto, tel
+        if (href.startsWith('#') || 
+            href.startsWith('javascript:') || 
+            href.startsWith('mailto:') ||
+            href.startsWith('tel:')) {
+          return;
+        }
+        
+        // Check if external link
+        try {
+          if (href.startsWith('http')) {
+            const linkUrl = new URL(href);
+            if (linkUrl.origin !== siteOrigin) {
+              console.log('[Visual Proxy] External link, allowing:', href);
+              return;
+            }
+          }
+        } catch (err) {}
+        
+        // This is an internal link - intercept it
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // Build target URL
+        let targetUrl;
+        if (href.startsWith('http')) {
+          targetUrl = href;
+        } else if (href.startsWith('/')) {
+          targetUrl = siteOrigin + href;
+        } else {
+          // Relative URL
+          const currentPath = new URL(baseSiteUrl).pathname;
+          const currentDir = currentPath.substring(0, currentPath.lastIndexOf('/') + 1);
+          targetUrl = siteOrigin + currentDir + href;
+        }
+        
+        // Navigate through proxy
+        const newProxyUrl = '/api/visual-proxy?url=' + encodeURIComponent(targetUrl);
+        console.log('[Visual Proxy] Navigating:', targetUrl);
+        window.location.href = newProxyUrl;
+        
+      }, true); // Use capture phase!
+      
+      console.log('[Visual Proxy] Link interceptor active');
+    })();
+  </script>
+`;
+
     const clickDetectionScript = `
       <script>
         (function() {
@@ -229,11 +306,14 @@ router.get('/', async (req, res) => {
     `;
 
     // Inject before closing body tag
-    html = html.replace('</body>', clickDetectionScript + '</body>');
+    html = html.replace('</body>', linkRewriteScript + clickDetectionScript + '</body>');
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-    res.setHeader('Content-Security-Policy', "frame-ancestors 'self' https://safewebedit.com");
+    // Allow iframe embedding - DO NOT set X-Frame-Options
+    res.setHeader('Content-Security-Policy', "frame-ancestors *; default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;");
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
 
     res.send(html);
 
