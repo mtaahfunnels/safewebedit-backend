@@ -19,6 +19,7 @@ const authRoutes = require('./api/routes/auth');
 const { authenticateToken } = require("./api/routes/auth");
 const wordpressRoutes = require("./api/routes/wordpress");
 const shopifyRoutes = require("./api/routes/shopify");
+const ghostRoutes = require("./api/routes/ghost");
 const sitesRoutes = require("./api/routes/sites"); // NEW: Universal platform support
 const slotsRoutes = require("./api/routes/slots");
 const contentRoutes = require("./api/routes/content");
@@ -152,6 +153,7 @@ app.use("/api/sites", authenticateToken, sitesRoutes);
 // WordPress routes (legacy - kept for backwards compatibility)
 app.use("/api/wordpress", authenticateToken, wordpressRoutes);
 app.use("/api/shopify", shopifyRoutes);
+app.use("/api/ghost", ghostRoutes);
 
 // Content management routes
 app.use("/api/slots", authenticateToken, slotsRoutes);
