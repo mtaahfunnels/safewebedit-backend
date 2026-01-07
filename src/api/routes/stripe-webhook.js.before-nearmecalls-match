@@ -1,0 +1,376 @@
+/**
+ * Stripe Webhook Handler
+ * Handles Stripe events for autonomous onboarding automation
+ *
+ * Pattern: Inspired by NearMeCalls webhook automation
+ */
+
+const express = require('express');
+const router = express.Router();
+const crypto = require('crypto');
+const db = require('../../services/database');
+const emailService = require('../../services/emailService');
+
+// Stripe will be initialized when needed
+let stripe = null;
+
+function getStripeClient() {
+  if (!stripe) {
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    if (!stripeKey) {
+      throw new Error('STRIPE_SECRET_KEY not configured');
+    }
+    stripe = require('stripe')(stripeKey);
+  }
+  return stripe;
+}
+
+/**
+ * POST /api/stripe/webhook
+ * Handle Stripe webhook events
+ *
+ * IMPORTANT: This endpoint must use express.raw() middleware, not express.json()
+ * Configured in server.js
+ */
+router.post('/webhook', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.error('[Stripe Webhook] STRIPE_WEBHOOK_SECRET not configured');
+    return res.status(500).send('Webhook secret not configured');
+  }
+
+  let event;
+
+  try {
+    const stripeClient = getStripeClient();
+    event = stripeClient.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    console.error('[Stripe Webhook] Signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  console.log('[Stripe Webhook] Event received:', event.type);
+
+  // Handle different event types
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed':
+        await handleCheckoutCompleted(event.data.object);
+        break;
+
+      case 'customer.subscription.updated':
+        await handleSubscriptionUpdated(event.data.object);
+        break;
+
+      case 'customer.subscription.deleted':
+        await handleSubscriptionDeleted(event.data.object);
+        break;
+
+      case 'invoice.payment_succeeded':
+        await handlePaymentSucceeded(event.data.object);
+        break;
+
+      case 'invoice.payment_failed':
+        await handlePaymentFailed(event.data.object);
+        break;
+
+      default:
+        console.log('[Stripe Webhook] Unhandled event type:', event.type);
+    }
+
+    res.json({ received: true });
+  } catch (error) {
+    console.error('[Stripe Webhook] Error processing event:', error);
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+/**
+ * Handle successful checkout completion
+ * This is the main automation trigger
+ */
+async function handleCheckoutCompleted(session) {
+  console.log('[Stripe Webhook] Checkout completed:', session.id);
+
+  const organizationId = session.client_reference_id || session.metadata.organization_id;
+
+  if (!organizationId) {
+    console.error('[Stripe Webhook] No organization ID in session');
+    return;
+  }
+
+  try {
+    // Get organization
+    const orgResult = await db.query(
+      'SELECT * FROM organizations WHERE id = $1',
+      [organizationId]
+    );
+
+    if (orgResult.rows.length === 0) {
+      console.error('[Stripe Webhook] Organization not found:', organizationId);
+      return;
+    }
+
+    const organization = orgResult.rows[0];
+
+    // Update organization with Stripe details and activate
+    await db.query(
+      `UPDATE organizations
+       SET stripe_customer_id = $1,
+           stripe_subscription_id = $2,
+           subscription_status = $3,
+           is_active = $4,
+           email_verified = $5
+       WHERE id = $6`,
+      [
+        session.customer,
+        session.subscription,
+        'active',
+        true,
+        true, // Mark email as verified
+        organizationId,
+      ]
+    );
+
+    console.log('[Stripe Webhook] Organization activated:', organizationId);
+
+    // Update subscription table
+    await db.query(
+      `UPDATE subscriptions
+       SET plan_name = $1,
+           stripe_subscription_id = $2,
+           stripe_customer_id = $3,
+           status = $4
+       WHERE organization_id = $5`,
+      [
+        'pro', // Pro plan
+        session.subscription,
+        session.customer,
+        'active',
+        organizationId,
+      ]
+    );
+
+    // Generate temporary password
+    const tempPassword = generateTempPassword();
+
+    // Create Keycloak user
+    await createKeycloakUser(organization, tempPassword);
+
+    // Send welcome email with password setup link
+    await emailService.sendWelcomeEmail(organization, tempPassword);
+
+    console.log('[Stripe Webhook] Onboarding automation completed for:', organization.email);
+
+  } catch (error) {
+    console.error('[Stripe Webhook] Error in checkout completion:', error);
+    throw error;
+  }
+}
+
+/**
+ * Handle subscription updates
+ */
+async function handleSubscriptionUpdated(subscription) {
+  console.log('[Stripe Webhook] Subscription updated:', subscription.id);
+
+  const organizationResult = await db.query(
+    'SELECT id FROM organizations WHERE stripe_subscription_id = $1',
+    [subscription.id]
+  );
+
+  if (organizationResult.rows.length === 0) {
+    console.log('[Stripe Webhook] No organization found for subscription:', subscription.id);
+    return;
+  }
+
+  const organizationId = organizationResult.rows[0].id;
+
+  // Update subscription status
+  await db.query(
+    `UPDATE subscriptions
+     SET status = $1
+     WHERE organization_id = $2`,
+    [subscription.status, organizationId]
+  );
+
+  // Update organization status
+  const isActive = subscription.status === 'active';
+  await db.query(
+    `UPDATE organizations
+     SET subscription_status = $1,
+         is_active = $2
+     WHERE id = $3`,
+    [subscription.status, isActive, organizationId]
+  );
+
+  console.log('[Stripe Webhook] Subscription status updated to:', subscription.status);
+}
+
+/**
+ * Handle subscription cancellation
+ */
+async function handleSubscriptionDeleted(subscription) {
+  console.log('[Stripe Webhook] Subscription deleted:', subscription.id);
+
+  await db.query(
+    `UPDATE organizations
+     SET subscription_status = $1,
+         is_active = $2
+     WHERE stripe_subscription_id = $3`,
+    ['canceled', false, subscription.id]
+  );
+
+  await db.query(
+    `UPDATE subscriptions
+     SET status = $1
+     WHERE stripe_subscription_id = $2`,
+    ['canceled', subscription.id]
+  );
+}
+
+/**
+ * Handle successful payment
+ */
+async function handlePaymentSucceeded(invoice) {
+  console.log('[Stripe Webhook] Payment succeeded:', invoice.id);
+
+  // Update last payment date
+  await db.query(
+    `UPDATE subscriptions
+     SET last_payment_at = NOW()
+     WHERE stripe_customer_id = $1`,
+    [invoice.customer]
+  );
+}
+
+/**
+ * Handle failed payment
+ */
+async function handlePaymentFailed(invoice) {
+  console.log('[Stripe Webhook] Payment failed:', invoice.id);
+
+  // TODO: Send payment failure notification email
+  // For now, just log it
+}
+
+/**
+ * Generate a secure temporary password
+ */
+function generateTempPassword() {
+  const length = 16;
+  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
+  let password = '';
+
+  const randomBytes = crypto.randomBytes(length);
+  for (let i = 0; i < length; i++) {
+    password += charset[randomBytes[i] % charset.length];
+  }
+
+  return password;
+}
+
+/**
+ * Create password setup token for organization
+ */
+async function createPasswordSetupToken(organizationId) {
+  try {
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48 hours
+
+    await db.query(
+      `INSERT INTO password_reset_tokens (organization_id, token, expires_at, used)
+       VALUES ($1, $2, $3, false)`,
+      [organizationId, token, expiresAt]
+    );
+
+    console.log('[Stripe Webhook] Created password setup token for org:', organizationId);
+    return token;
+  } catch (error) {
+    console.error('[Stripe Webhook] Failed to create password setup token:', error);
+    throw error;
+  }
+}
+
+/**
+ * Create Keycloak user for the organization
+ */
+async function createKeycloakUser(organization, tempPassword) {
+  console.log('[Stripe Webhook] Creating Keycloak user for:', organization.email);
+
+  try {
+    const { execSync } = require('child_process');
+
+    // Get admin token
+    const tokenCmd = `docker exec safewebedit-keycloak /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user admin --password "${process.env.KEYCLOAK_ADMIN_PASSWORD || 'admin'}" 2>&1 | grep -v "Logging into"`;
+
+    execSync(tokenCmd, { stdio: 'pipe' });
+
+    // Create user
+    const createUserCmd = `docker exec safewebedit-keycloak /opt/keycloak/bin/kcadm.sh create users -r safewebedit -s username="${organization.email}" -s email="${organization.email}" -s enabled=true -s emailVerified=true 2>&1`;
+
+    const output = execSync(createUserCmd, { encoding: 'utf8', stdio: 'pipe' });
+
+    // Extract user ID from output (format: Created new user with id '...')
+    const userIdMatch = output.match(/id '([^']+)'/);
+    const keycloakUserId = userIdMatch ? userIdMatch[1] : null;
+
+    if (!keycloakUserId) {
+      console.error('[Stripe Webhook] Could not extract Keycloak user ID');
+      throw new Error('Failed to get Keycloak user ID');
+    }
+
+    // Set password
+    const setPasswordCmd = `docker exec safewebedit-keycloak /opt/keycloak/bin/kcadm.sh set-password -r safewebedit --username "${organization.email}" --new-password "${tempPassword}"`;
+
+    execSync(setPasswordCmd, { stdio: 'pipe' });
+
+    // Update organization with Keycloak ID
+    await db.query(
+      'UPDATE organizations SET keycloak_id = $1 WHERE id = $2',
+      [keycloakUserId, organization.id]
+    );
+
+    console.log('[Stripe Webhook] Keycloak user created:', keycloakUserId);
+
+  } catch (error) {
+    console.error('[Stripe Webhook] Keycloak user creation failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Send welcome email with login credentials
+ */
+async function sendWelcomeEmail(organization, tempPassword) {
+  console.log('[Stripe Webhook] Sending welcome email to:', organization.email);
+
+  // TODO: Integrate with SendGrid or other email service
+  // For now, just log the credentials (REMOVE IN PRODUCTION!)
+
+  console.log('='.repeat(60));
+  console.log('WELCOME EMAIL (TODO: Implement SendGrid)');
+  console.log('='.repeat(60));
+  console.log(`To: ${organization.email}`);
+  console.log(`Business: ${organization.name}`);
+  console.log(`Login URL: ${process.env.FRONTEND_URL}/login`);
+  console.log(`Email: ${organization.email}`);
+  console.log(`Temporary Password: ${tempPassword}`);
+  console.log('='.repeat(60));
+
+  // Store temp password hash for password reset flow
+  const bcrypt = require('bcryptjs');
+  const tempPasswordHash = await bcrypt.hash(tempPassword, 10);
+
+  await db.query(
+    'UPDATE organizations SET password_hash = $1 WHERE id = $2',
+    [tempPasswordHash, organization.id]
+  );
+
+  // TODO: Create password reset token and send email with setup link
+  // For MVP, user will use the temp password to login, then change it
+}
+
+module.exports = router;

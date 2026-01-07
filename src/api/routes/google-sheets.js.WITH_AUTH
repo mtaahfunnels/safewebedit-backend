@@ -1,0 +1,155 @@
+/**
+ * Google Sheets API Routes
+ * Pattern: Same as nearmecalls /api/google-calendar routes
+ */
+
+const express = require('express');
+const router = express.Router();
+const { authenticateToken } = require('./auth');
+const db = require('../../services/database');
+const {
+  extractSpreadsheetId,
+  testAccess,
+  readSheet,
+  getSheetNames,
+  parseSpreadsheetData,
+} = require('../../services/googleSheets');
+
+/**
+ * GET /api/google-sheets/settings
+ */
+router.get('/settings', authenticateToken, async (req, res) => {
+  console.log('[Google Sheets] Fetching settings for org:', req.organization.id);
+
+  try {
+    const result = await db.query(
+      'SELECT google_sheet_id, google_sheet_url, google_sheet_range, sync_enabled, last_synced_at FROM organizations WHERE id = $1',
+      [req.organization.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Organization not found' });
+    }
+
+    const org = result.rows[0];
+
+    return res.json({
+      success: true,
+      configured: !!org.google_sheet_id,
+      google_sheet_id: org.google_sheet_id || '',
+      google_sheet_url: org.google_sheet_url || '',
+      google_sheet_range: org.google_sheet_range || 'Sheet1!A:Z',
+      sync_enabled: org.sync_enabled || false,
+      last_synced_at: org.last_synced_at,
+    });
+  } catch (error) {
+    console.error('[Google Sheets] Settings error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/google-sheets/settings
+ */
+router.post('/settings', authenticateToken, async (req, res) => {
+  console.log('[Google Sheets] Saving settings');
+
+  try {
+    const { google_sheet_url, google_sheet_range } = req.body;
+
+    if (!google_sheet_url) {
+      return res.status(400).json({ error: 'google_sheet_url is required' });
+    }
+
+    const spreadsheetId = extractSpreadsheetId(google_sheet_url);
+
+    if (!spreadsheetId) {
+      return res.status(400).json({ error: 'Invalid Google Sheets URL' });
+    }
+
+    const range = google_sheet_range || 'Sheet1!A:Z';
+
+    await db.query(
+      'UPDATE organizations SET google_sheet_id = $1, google_sheet_url = $2, google_sheet_range = $3, updated_at = NOW() WHERE id = $4',
+      [spreadsheetId, google_sheet_url, range, req.organization.id]
+    );
+
+    return res.json({
+      success: true,
+      message: 'Google Sheets configured',
+      google_sheet_id: spreadsheetId,
+    });
+  } catch (error) {
+    console.error('[Google Sheets] Save error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/google-sheets/test-connection
+ */
+router.post('/test-connection', authenticateToken, async (req, res) => {
+  console.log('[Google Sheets] Testing connection');
+
+  try {
+    const { google_sheet_url } = req.body;
+
+    if (!google_sheet_url) {
+      return res.status(400).json({ error: 'google_sheet_url is required' });
+    }
+
+    const spreadsheetId = extractSpreadsheetId(google_sheet_url);
+
+    if (!spreadsheetId) {
+      return res.status(400).json({ error: 'Invalid URL' });
+    }
+
+    const result = await testAccess(spreadsheetId);
+
+    return res.json(result);
+  } catch (error) {
+    console.error('[Google Sheets] Test error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * GET /api/google-sheets/preview
+ */
+router.get('/preview', authenticateToken, async (req, res) => {
+  console.log('[Google Sheets] Fetching preview');
+
+  try {
+    const orgResult = await db.query(
+      'SELECT google_sheet_id, google_sheet_range FROM organizations WHERE id = $1',
+      [req.organization.id]
+    );
+
+    if (orgResult.rows.length === 0 || !orgResult.rows[0].google_sheet_id) {
+      return res.status(400).json({ error: 'Google Sheets not configured' });
+    }
+
+    const { google_sheet_id, google_sheet_range } = orgResult.rows[0];
+
+    const sheetResult = await readSheet(google_sheet_id, google_sheet_range);
+
+    if (!sheetResult.success) {
+      return res.status(400).json(sheetResult);
+    }
+
+    const previewData = sheetResult.values.slice(0, 10);
+    const parsedData = parseSpreadsheetData(previewData);
+
+    return res.json({
+      success: true,
+      headers: previewData[0] || [],
+      rows: parsedData,
+      totalRows: sheetResult.rowCount,
+    });
+  } catch (error) {
+    console.error('[Google Sheets] Preview error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+module.exports = router;

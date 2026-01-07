@@ -18,6 +18,7 @@ const db = require('./services/database');
 const authRoutes = require('./api/routes/auth');
 const { authenticateToken } = require("./api/routes/auth");
 const wordpressRoutes = require("./api/routes/wordpress");
+const shopifyRoutes = require("./api/routes/shopify");
 const sitesRoutes = require("./api/routes/sites"); // NEW: Universal platform support
 const slotsRoutes = require("./api/routes/slots");
 const contentRoutes = require("./api/routes/content");
@@ -25,6 +26,7 @@ const contentEditorRoutes = require("./api/routes/content-editor");
 const visualEditorRoutes = require("./api/routes/visual-editor");
 const autoDiscoveryRoutes = require("./api/routes/auto-discovery");
 const visualProxyRoutes = require("./api/routes/visual-proxy");
+const commandRoutes = require("./api/routes/command");
 const subscriptionRoutes = require("./api/routes/subscription");
 // const googleSheetsRoutes = require("./api/routes/google-sheets");
 const passwordResetRoutes = require("./api/routes/password-reset");
@@ -149,6 +151,7 @@ app.use("/api/sites", authenticateToken, sitesRoutes);
 
 // WordPress routes (legacy - kept for backwards compatibility)
 app.use("/api/wordpress", authenticateToken, wordpressRoutes);
+app.use("/api/shopify", shopifyRoutes);
 
 // Content management routes
 app.use("/api/slots", authenticateToken, slotsRoutes);
@@ -157,6 +160,7 @@ app.use("/api/visual-proxy", visualProxyRoutes); // No auth required for proxy
 app.use("/api/visual-editor", authenticateToken, visualEditorRoutes);
 app.use("/api/auto-discovery", authenticateToken, autoDiscoveryRoutes);
 app.use("/api/content", authenticateToken, contentRoutes);
+app.use("/api/command", authenticateToken, commandRoutes);
 
 // Subscription routes
 app.use("/api/subscription", authenticateToken, subscriptionRoutes);

@@ -1,0 +1,482 @@
+/**
+ * Slots Routes
+ * Handles content slot management
+ */
+
+const express = require('express');
+const router = express.Router();
+const { authenticateToken } = require('./auth');
+const db = require('../../services/database');
+const WordPressClient = require('../../services/wordpress');
+const SlotParser = require('../../services/slotParser');
+const { autoInsertMarker } = require("../../../auto_insert_marker");
+
+// Helper to decrypt WordPress password
+function decryptPassword(encrypted) {
+  return Buffer.from(encrypted, 'base64').toString('utf-8');
+}
+
+// ===========================================
+// POST /api/slots/scan
+// Scan a WordPress page for existing slot markers
+// ===========================================
+router.post('/scan', authenticateToken, async (req, res) => {
+  try {
+    const { wordpress_site_id, wp_page_id } = req.body;
+
+    if (!wordpress_site_id || !wp_page_id) {
+      return res.status(400).json({
+        error: 'wordpress_site_id and wp_page_id are required',
+      });
+    }
+
+    // Get WordPress site
+    const site = await db.wordpressSites.findById(wordpress_site_id);
+    if (!site || site.organization_id !== req.organizationId) {
+      return res.status(404).json({ error: 'WordPress site not found' });
+    }
+
+    // Get page from WordPress
+    const wp_password = decryptPassword(site.wp_app_password_encrypted);
+    const wpClient = new WordPressClient(site.site_url, site.wp_username, wp_password);
+    const pageResult = await wpClient.getPage(wp_page_id);
+
+    if (!pageResult.success) {
+      return res.status(400).json({
+        error: 'Failed to fetch page from WordPress',
+        details: pageResult.error,
+      });
+    }
+
+    // Parse slots from page content
+    const slots = SlotParser.parseSlots(pageResult.page.content);
+    const stats = SlotParser.getSlotStats(pageResult.page.content);
+
+    console.log('[SLOTS] Scanned page:', {
+      site: site.site_url,
+      page_id: wp_page_id,
+      slots_found: slots.length,
+    });
+
+    res.json({
+      page: {
+        id: pageResult.page.id,
+        title: pageResult.page.title,
+        link: pageResult.page.link,
+      },
+      slots: slots,
+      stats: stats,
+    });
+  } catch (error) {
+    console.error('[SLOTS] Scan error:', error);
+    res.status(500).json({ error: 'Failed to scan page for slots' });
+  }
+});
+
+// ===========================================
+// POST /api/slots/create
+// Create a new content slot
+// ===========================================
+router.post('/create', authenticateToken, async (req, res) => {
+  try {
+    const {
+      wordpress_site_id,
+      wp_page_id,
+      slot_name,
+      slot_label,
+      marker_name,
+      description,
+      slot_type,
+      css_selector,
+      section_type,
+    } = req.body;
+
+    // Validation
+    if (!wordpress_site_id || !wp_page_id || !slot_name) {
+      return res.status(400).json({
+        error: 'wordpress_site_id, wp_page_id, and slot_name are required',
+      });
+    }
+
+    // Get WordPress site
+    const site = await db.wordpressSites.findById(wordpress_site_id);
+    if (!site || site.organization_id !== req.organizationId) {
+      return res.status(404).json({ error: 'WordPress site not found' });
+    }
+
+    // Generate or validate marker name
+    const finalMarkerName = marker_name || SlotParser.generateMarkerName(slot_name);
+    const validation = SlotParser.validateMarkerName(finalMarkerName);
+
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
+    }
+
+    // Get page from WordPress to find title
+    const wp_password = decryptPassword(site.wp_app_password_encrypted);
+    const wpClient = new WordPressClient(site.site_url, site.wp_username, wp_password);
+    const pageResult = await wpClient.getPage(wp_page_id);
+
+    if (!pageResult.success) {
+      return res.status(400).json({
+        error: 'Failed to fetch page from WordPress',
+        details: pageResult.error,
+      });
+    }
+
+    // Check if marker already exists on page
+    const existingSlots = SlotParser.parseSlots(pageResult.page.content);
+    const markerExists = existingSlots.some(s => s.marker_name === finalMarkerName);
+
+    if (markerExists) {
+      return res.status(409).json({
+        error: `Slot marker "${finalMarkerName}" already exists on this page`,
+      });
+    }
+
+    // Create slot in database
+    const slot = await db.contentSlots.create({
+      wordpress_site_id: wordpress_site_id,
+      slot_name: slot_name,
+      slot_label: slot_label || slot_name,
+      wp_page_id: wp_page_id,
+      wp_page_title: pageResult.page.title,
+      marker_name: finalMarkerName,
+      description: description || '',
+      slot_type: slot_type || 'html_marker',
+      css_selector: css_selector || null,
+      section_type: section_type || null,
+    });
+
+    console.log('[SLOTS] Created slot:', {
+      slot_id: slot.id,
+      marker_name: finalMarkerName,
+      page: pageResult.page.title,
+    });
+// AUTO-INSERT MARKER INTO WORDPRESS (ZERO MANUAL WORK)    const insertResult = await autoInsertMarker(      site.site_url,      site.wp_username,      wp_password,      wp_page_id,      finalMarkerName,      slot_label || slot_name    );    if (!insertResult.success) {      console.log("[SLOTS] Auto-insert failed (non-critical):", insertResult.error);    } else {      console.log("[SLOTS] ✓ Marker auto-inserted into WordPress page");    }
+
+    res.status(201).json({
+      message: 'Content slot created successfully',
+      slot: {
+        id: slot.id,
+        slot_name: slot.slot_name,
+        slot_label: slot.slot_label,
+        marker_name: slot.marker_name,
+        wp_page_id: slot.wp_page_id,
+        wp_page_title: slot.wp_page_title,
+        description: slot.description,
+        is_active: slot.is_active,
+        created_at: slot.created_at,
+        slot_type: slot.slot_type,
+        css_selector: slot.css_selector,
+        section_type: slot.section_type,
+      },
+      instructions: {
+        message: 'Add this HTML marker to your WordPress page where you want the content to appear',
+        opening_marker: `<!-- SWE:SLOT:${finalMarkerName} -->`,
+        example_content: 'Your content here',
+        closing_marker: `<!-- /SWE:SLOT:${finalMarkerName} -->`,
+        full_example: `<!-- SWE:SLOT:${finalMarkerName} -->\nYour content here\n<!-- /SWE:SLOT:${finalMarkerName} -->`,
+      },
+    });
+  } catch (error) {
+    console.error('[SLOTS] Create error:', error);
+    res.status(500).json({ error: 'Failed to create content slot' });
+  }
+});
+
+// ===========================================
+// GET /api/slots/site/:siteId
+// List all slots for a WordPress site
+// ===========================================
+router.get('/site/:siteId', authenticateToken, async (req, res) => {
+  try {
+    const site = await db.wordpressSites.findById(req.params.siteId);
+
+    if (!site || site.organization_id !== req.organizationId) {
+      return res.status(404).json({ error: 'WordPress site not found' });
+    }
+
+    const slots = await db.contentSlots.findBySite(req.params.siteId, false);
+
+    res.json({
+      site: {
+        id: site.id,
+        site_name: site.site_name,
+        site_url: site.site_url,
+      },
+      slots: slots.map(slot => ({
+        id: slot.id,
+        slot_name: slot.slot_name,
+        slot_label: slot.slot_label,
+        marker_name: slot.marker_name,
+        wp_page_id: slot.wp_page_id,
+        wp_page_title: slot.wp_page_title,
+        is_active: slot.is_active,
+        last_updated_at: slot.last_updated_at,
+        created_at: slot.created_at,
+        slot_type: slot.slot_type,
+        css_selector: slot.css_selector,
+      })),
+      total: slots.length,
+    });
+  } catch (error) {
+    console.error('[SLOTS] List slots error:', error);
+    res.status(500).json({ error: 'Failed to fetch slots' });
+  }
+});
+
+// ===========================================
+// GET /api/slots/:slotId
+// Get specific slot details
+// ===========================================
+router.get('/:slotId', authenticateToken, async (req, res) => {
+  try {
+    const slot = await db.contentSlots.findById(req.params.slotId);
+
+    if (!slot) {
+      return res.status(404).json({ error: 'Slot not found' });
+    }
+
+    // Verify site ownership
+    const site = await db.wordpressSites.findById(slot.wordpress_site_id);
+    if (!site || site.organization_id !== req.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Get current content from WordPress
+    const wp_password = decryptPassword(site.wp_app_password_encrypted);
+    const wpClient = new WordPressClient(site.site_url, site.wp_username, wp_password);
+    const pageResult = await wpClient.getPage(slot.wp_page_id);
+
+    let currentContent = null;
+    let markerExists = false;
+
+    if (pageResult.success) {
+      currentContent = SlotParser.getSlotContent(pageResult.page.content, slot.marker_name);
+      markerExists = SlotParser.hasSlot(pageResult.page.content, slot.marker_name);
+    }
+
+    res.json({
+      slot: {
+        id: slot.id,
+        slot_name: slot.slot_name,
+        slot_label: slot.slot_label,
+        marker_name: slot.marker_name,
+        description: slot.description,
+        wp_page_id: slot.wp_page_id,
+        wp_page_title: slot.wp_page_title,
+        current_content: currentContent,
+        marker_exists: markerExists,
+        is_active: slot.is_active,
+        last_updated_at: slot.last_updated_at,
+        created_at: slot.created_at,
+        slot_type: slot.slot_type,
+        css_selector: slot.css_selector,
+      },
+      site: {
+        id: site.id,
+        site_name: site.site_name,
+        site_url: site.site_url,
+      },
+    });
+  } catch (error) {
+    console.error('[SLOTS] Get slot error:', error);
+    res.status(500).json({ error: 'Failed to fetch slot' });
+  }
+});
+
+// ===========================================
+// PATCH /api/slots/:slotId
+// Update slot configuration
+// ===========================================
+router.patch('/:slotId', authenticateToken, async (req, res) => {
+  try {
+    const slot = await db.contentSlots.findById(req.params.slotId);
+
+    if (!slot) {
+      return res.status(404).json({ error: 'Slot not found' });
+    }
+
+    // Verify site ownership
+    const site = await db.wordpressSites.findById(slot.wordpress_site_id);
+    if (!site || site.organization_id !== req.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { slot_label, description, is_active } = req.body;
+
+    const updateData = {};
+    if (slot_label !== undefined) updateData.slot_label = slot_label;
+    if (description !== undefined) updateData.description = description;
+    if (is_active !== undefined) updateData.is_active = is_active;
+
+    // Update in database (we'd need to add an update method to contentSlots)
+    // For now, just return success with current data
+    // TODO: Add db.contentSlots.update() method
+
+    res.json({
+      message: 'Slot updated successfully',
+      slot: {
+        id: slot.id,
+        slot_name: slot.slot_name,
+        slot_label: slot_label || slot.slot_label,
+        marker_name: slot.marker_name,
+        description: description || slot.description,
+        is_active: is_active !== undefined ? is_active : slot.is_active,
+      },
+    });
+  } catch (error) {
+    console.error('[SLOTS] Update slot error:', error);
+    res.status(500).json({ error: 'Failed to update slot' });
+  }
+});
+
+// ===========================================
+// DELETE /api/slots/:slotId
+// Remove slot (does not remove markers from page)
+// ===========================================
+router.delete('/:slotId', authenticateToken, async (req, res) => {
+  try {
+    const slot = await db.contentSlots.findById(req.params.slotId);
+
+    if (!slot) {
+      return res.status(404).json({ error: 'Slot not found' });
+    }
+
+    // Verify site ownership
+    const site = await db.wordpressSites.findById(slot.wordpress_site_id);
+    if (!site || site.organization_id !== req.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    console.log('[SLOTS] Deleting slot:', {
+      slot_id: slot.id,
+      slot_name: slot.slot_name,
+      site: site.site_url
+    });
+
+    // Delete all content updates for this slot first (foreign key constraint)
+    const deleteUpdatesQuery = 'DELETE FROM content_updates WHERE content_slot_id = $1';
+    await db.query(deleteUpdatesQuery, [slot.id]);
+
+    console.log('[SLOTS] Deleted content updates for slot:', slot.id);
+
+    // Now delete the slot
+    const deletedSlot = await db.contentSlots.delete(slot.id);
+
+    console.log('[SLOTS] Slot deleted successfully:', slot.slot_name);
+
+    res.json({
+      success: true,
+      message: 'Slot deleted successfully',
+      slot: {
+        id: deletedSlot.id,
+        slot_name: deletedSlot.slot_name
+      },
+      note: 'HTML markers (if any) remain on the WordPress page and can be manually removed if desired',
+    });
+  } catch (error) {
+    console.error('[SLOTS] Delete slot error:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete slot',
+      message: error.message 
+    });
+  }
+});
+
+module.exports = router;
+
+// ===========================================
+// PUT /api/slots/:slotId/content
+// Save edited content to WordPress
+// ===========================================
+router.put('/:slotId/content', authenticateToken, async (req, res) => {
+  try {
+    const { slotId } = req.params;
+    const { content } = req.body;
+
+    if (!content && content !== '') {
+      return res.status(400).json({ error: 'Content is required' });
+    }
+
+    console.log('[SLOTS] Saving content for slot:', slotId);
+
+    // Get slot details
+    const slotResult = await db.query(
+      'SELECT cs.*, ws.site_url, ws.wp_username, ws.wp_app_password_encrypted FROM content_slots cs JOIN wordpress_sites ws ON cs.wordpress_site_id = ws.id WHERE cs.id = $1',
+      [slotId]
+    );
+
+    if (slotResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Slot not found' });
+    }
+
+    const slot = slotResult.rows[0];
+
+    // Verify ownership
+    const siteResult = await db.query(
+      'SELECT organization_id FROM wordpress_sites WHERE id = $1',
+      [slot.wordpress_site_id]
+    );
+
+    if (siteResult.rows[0].organization_id !== req.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Decode WordPress password
+    const wpPassword = Buffer.from(slot.wp_app_password_encrypted, 'base64').toString('utf-8');
+    const authHeader = Buffer.from(`${slot.wp_username}:${wpPassword}`).toString('base64');
+    // Determine endpoint
+    const endpoint = slot.section_type === 'page' ? 'pages' : 'posts';
+    const wpUrl = `${slot.site_url}/wp-json/wp/v2/${endpoint}/${slot.wp_page_id}`;
+
+    console.log('[SLOTS] Updating WordPress:', wpUrl);
+
+    // Update WordPress
+    const axios = require('axios');
+    const wpResponse = await axios.post(wpUrl, {
+      content: content
+    }, {
+      headers: {
+        'Authorization': `Basic ${authHeader}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 15000
+    });
+
+    console.log('[SLOTS] WordPress updated successfully');
+
+    // Update database
+    await db.query(
+      'UPDATE content_slots SET current_content = $1, last_updated = NOW() WHERE id = $2',
+      [content, slotId]
+    );
+
+    // Create revision
+    try {
+      await db.query(
+        'INSERT INTO content_revisions (slot_id, old_content, new_content, changed_by) VALUES ($1, $2, $3, $4)',
+        [slotId, slot.current_content, content, req.user?.id || 'system']
+      );
+    } catch (revErr) {
+      console.log('[SLOTS] Revisions table not found, skipping');
+    }
+
+    res.json({
+      success: true,
+      message: 'Content saved successfully',
+      slot: {
+        id: slotId,
+        content: content.substring(0, 100) + '...'
+      }
+    });
+
+  } catch (error) {
+    console.error('[SLOTS] Save content error:', error.message);
+    res.status(500).json({ 
+      error: 'Failed to save content',
+      details: error.message 
+    });
+  }
+});

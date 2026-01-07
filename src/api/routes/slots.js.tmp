@@ -1,0 +1,96 @@
+
+
+// ===========================================
+// PUT /api/slots/:slotId/content
+// Save edited content to WordPress
+// ===========================================
+router.put('/:slotId/content', authenticateToken, async (req, res) => {
+  try {
+    const { slotId } = req.params;
+    const { content } = req.body;
+
+    if (!content && content !== '') {
+      return res.status(400).json({ error: 'Content is required' });
+    }
+
+    console.log('[SLOTS] Saving content for slot:', slotId);
+
+    // Get slot details
+    const slotResult = await db.query(
+      'SELECT cs.*, ws.site_url, ws.wp_username, ws.wp_app_password_encrypted FROM content_slots cs JOIN wordpress_sites ws ON cs.wordpress_site_id = ws.id WHERE cs.id = $1',
+      [slotId]
+    );
+
+    if (slotResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Slot not found' });
+    }
+
+    const slot = slotResult.rows[0];
+
+    // Verify ownership
+    const siteResult = await db.query(
+      'SELECT organization_id FROM wordpress_sites WHERE id = $1',
+      [slot.wordpress_site_id]
+    );
+
+    if (siteResult.rows[0].organization_id !== req.organizationId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Decode WordPress password
+    const wpPassword = Buffer.from(slot.wp_app_password_encrypted, 'base64').toString('utf-8');
+    const authHeader = Buffer.from(`${slot.wp_username}:${wpPassword}`).toString('base64');
+
+    // Determine endpoint
+    const endpoint = slot.section_type === 'page' ? 'pages' : 'posts';
+    const wpUrl = `${slot.site_url}/wp-json/wp/v2/${endpoint}/${slot.wp_page_id}`;
+
+    console.log('[SLOTS] Updating WordPress:', wpUrl);
+
+    // Update WordPress
+    const axios = require('axios');
+    const wpResponse = await axios.post(wpUrl, {
+      content: content
+    }, {
+      headers: {
+        'Authorization': `Basic ${authHeader}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 15000
+    });
+
+    console.log('[SLOTS] WordPress updated successfully');
+
+    // Update database
+    await db.query(
+      'UPDATE content_slots SET current_content = $1, last_updated = NOW() WHERE id = $2',
+      [content, slotId]
+    );
+
+    // Create revision
+    try {
+      await db.query(
+        'INSERT INTO content_revisions (slot_id, old_content, new_content, changed_by) VALUES ($1, $2, $3, $4)',
+        [slotId, slot.current_content, content, req.user?.id || 'system']
+      );
+    } catch (revErr) {
+      console.log('[SLOTS] Revisions table not found, skipping');
+    }
+
+    res.json({
+      success: true,
+      message: 'Content saved successfully',
+      slot: {
+        id: slotId,
+        content: content.substring(0, 100) + '...'
+      }
+    });
+
+  } catch (error) {
+    console.error('[SLOTS] Save content error:', error.message);
+    res.status(500).json({
+      error: 'Failed to save content',
+      details: error.message
+    });
+  }
+});
