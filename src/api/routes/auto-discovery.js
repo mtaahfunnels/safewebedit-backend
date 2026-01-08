@@ -434,47 +434,6 @@ router.put('/update-content', async (req, res) => {
       }
 
       // Strategy 3: More flexible text search (strip extra whitespace)
-
-      // Strategy 4: HTML entity normalization
-      if (!replaced) {
-        console.log('[AUTO-DISCOVERY] Strategy 4: HTML entity normalization');
-
-        const decodeEntities = (text) => text
-          .replace(/&nbsp;/g, ' ')
-          .replace(/&amp;/g, '&')
-          .replace(/&#39;/g, "'")
-          .replace(/&#8217;/g, "'")
-          .replace(/&#8216;/g, "'")
-          .replace(/&#8220;/g, '\"')
-          .replace(/&#8221;/g, '\"')
-          .replace(/&quot;/g, '\"')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        const decodedOrig = decodeEntities(originalContent);
-        const decodedCurr = decodeEntities(currentContent);
-
-        console.log('[AUTO-DISCOVERY] Decoded original:', decodedOrig.substring(0, 80));
-
-        if (decodedCurr.includes(decodedOrig)) {
-          const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\]/g, '\$&');
-          const flexPattern = escapeRegex(originalContent)
-            .replace(/\s+/g, '(?:\s|&nbsp;)+')
-            .replace(/'/g, "(?:'|&#39;|&#8217;|&#8216;)")
-            .replace(/\"/g, '(?:\\"|&quot;|&#8220;|&#8221;)')
-            .replace(/&/g, '(?:&|&amp;)');
-
-          const regex = new RegExp(flexPattern, 'i');
-          const match = currentContent.match(regex);
-
-          if (match) {
-            updatedContent = currentContent.replace(match[0], content);
-            console.log('[AUTO-DISCOVERY] Replaced zone content (HTML entity match)');
-            replaced = true;
-          }
-        }
-      }
-
       if (!replaced) {
         const normalizedOriginal = originalContent.trim().replace(/\s+/g, ' ');
         const normalizedCurrent = currentContent.replace(/\s+/g, ' ');
