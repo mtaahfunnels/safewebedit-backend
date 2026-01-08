@@ -588,7 +588,37 @@ class WordPressClient {
    */
   _parseError(error) {
     if (error.response) {
-      // WordPress REST API error
+      const { status, data, headers } = error.response;
+      const contentType = headers?.['content-type'] || '';
+
+      // Check if response is HTML instead of JSON
+      const isHTML = contentType.includes('text/html') ||
+                     (typeof data === 'string' && data.trim().startsWith('<'));
+
+      if (isHTML) {
+        // WordPress returned HTML error page
+        let message = 'WordPress REST API not responding correctly';
+
+        if (status === 404) {
+          message = 'WordPress REST API not found. Ensure the site has WordPress installed and wp-json endpoint is accessible.';
+        } else if (status === 403) {
+          message = 'Access forbidden. WordPress may have security plugins blocking API access.';
+        } else if (status === 401) {
+          message = 'Authentication failed. Check your username and application password.';
+        } else if (status >= 500) {
+          message = 'WordPress server error. The site may be experiencing technical difficulties.';
+        }
+
+        return {
+          type: 'html_response',
+          message: message,
+          code: `HTTP_${status}`,
+          status: status,
+          suggestion: 'Verify the site URL is correct and the WordPress REST API is enabled.',
+        };
+      }
+
+      // Standard JSON API error
       return {
         type: 'api_error',
         message: error.response.data?.message || error.message,
@@ -601,13 +631,22 @@ class WordPressClient {
         type: 'network_error',
         message: 'Unable to reach WordPress site. Check the URL and network connection.',
         code: 'NETWORK_ERROR',
+        suggestion: 'Ensure the site URL is correct (e.g., https://yoursite.com) and the site is online.',
       };
     } else {
-      // Other error
+      // Other error (like JSON parse error)
+      let message = error.message || 'An unknown error occurred';
+
+      // Detect JSON parse errors
+      if (message.includes('Unexpected token') || message.includes('JSON')) {
+        message = 'Received invalid response from WordPress. The site may not have REST API enabled.';
+      }
+
       return {
         type: 'unknown_error',
-        message: error.message || 'An unknown error occurred',
+        message: message,
         code: 'UNKNOWN_ERROR',
+        suggestion: 'Check if the site is a valid WordPress installation with REST API enabled.',
       };
     }
   }
