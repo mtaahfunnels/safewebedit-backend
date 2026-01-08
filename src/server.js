@@ -34,6 +34,7 @@ const passwordResetRoutes = require("./api/routes/password-reset");
 const onboardRoutes = require("./api/routes/onboard"); // NEW: Onboarding flow
 const stripeWebhookRoutes = require("./api/routes/stripe-webhook"); // NEW: Stripe webhooks
 const emailRoutes = require("./api/routes/email"); // Email inbound parse webhook
+const platformDetectionRoutes = require("./api/routes/platform-detection"); // NEW: Freemium platform detection
 
 // Initialize Express app
 const app = express();
@@ -146,6 +147,8 @@ app.use('/api/auth', authRoutes);
 app.use("/api", authRoutes);
 // Onboarding routes (public - no auth required)
 app.use("/api/onboard", onboardRoutes);
+// Platform detection routes (public - no auth required for freemium)
+app.use("/api/platform-detection", platformDetectionRoutes);
 
 // Sites routes (NEW - unified WordPress + Universal)
 app.use("/api/sites", authenticateToken, sitesRoutes);
