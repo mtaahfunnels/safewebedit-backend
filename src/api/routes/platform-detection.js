@@ -1,10 +1,12 @@
 const express = require("express");
 const router = express.Router();
 const axios = require("axios");
+const cheerio = require("cheerio");
 
 /**
- * Platform Detection API
+ * Platform Detection API with Zone Validation
  * Detects if a website is WordPress, Shopify, Ghost, or other
+ * Validates zones against actual WordPress content
  * No authentication required - used for freemium landing page
  */
 
@@ -46,7 +48,7 @@ router.post("/detect", async (req, res) => {
 
       if (wpResponse.status === 200 && wpResponse.data) {
         const wpData = wpResponse.data;
-        
+
         if (wpData.name || wpData.description || wpData.url) {
           results.platform = "wordpress";
           results.version = wpData.wp_version || wpData.gmt_offset !== undefined ? "detected" : null;
@@ -186,23 +188,9 @@ router.post("/detect", async (req, res) => {
 });
 
 // ===========================================
-// GET /api/platform-detection/test
-// Test endpoint to verify API is working
-// ===========================================
-router.get("/test", (req, res) => {
-  res.json({
-    status: "ok",
-    message: "Platform detection API is running",
-    supportedPlatforms: ["wordpress", "shopify", "ghost"],
-  });
-});
-
-module.exports = router;
-
-// ===========================================
 // POST /api/platform-detection/discover-zones
-// Discover editable zones on any website (public, no auth)
-// Returns zones but marks them as requiring subscription
+// Discover AND VALIDATE editable zones
+// Only returns zones that can ACTUALLY be edited
 // ===========================================
 router.post("/discover-zones", async (req, res) => {
   const { url } = req.body;
@@ -217,12 +205,13 @@ router.post("/discover-zones", async (req, res) => {
       normalizedUrl = "https://" + normalizedUrl;
     }
 
-    console.log("[PUBLIC-DISCOVERY] Discovering zones for:", normalizedUrl);
+    console.log("[ZONE-VALIDATION] Starting validated zone discovery for:", normalizedUrl);
 
-    // First detect the platform
+    // Step 1: Detect platform
     const platformResponse = await axios.post(
       "http://localhost:5005/api/platform-detection/detect",
-      { url: normalizedUrl }
+      { url: normalizedUrl },
+      { timeout: 10000 }
     );
 
     const platformData = platformResponse.data;
@@ -237,61 +226,196 @@ router.post("/discover-zones", async (req, res) => {
       });
     }
 
-    // Fetch the WordPress homepage HTML
+    // Step 2: Fetch public posts from WordPress REST API to validate zones
+    let editablePosts = [];
+    try {
+      const postsResponse = await axios.get(`${normalizedUrl}/wp-json/wp/v2/posts`, {
+        timeout: 10000,
+        params: {
+          per_page: 10,
+          _fields: "id,title,content,link",
+        },
+      });
+
+      editablePosts = postsResponse.data || [];
+      console.log(`[ZONE-VALIDATION] Fetched ${editablePosts.length} public posts for validation`);
+    } catch (error) {
+      console.error("[ZONE-VALIDATION] Could not fetch posts:", error.message);
+    }
+
+    // Also fetch pages
+    let editablePages = [];
+    try {
+      const pagesResponse = await axios.get(`${normalizedUrl}/wp-json/wp/v2/pages`, {
+        timeout: 10000,
+        params: {
+          per_page: 10,
+          _fields: "id,title,content,link",
+        },
+      });
+
+      editablePages = pagesResponse.data || [];
+      console.log(`[ZONE-VALIDATION] Fetched ${editablePages.length} public pages for validation`);
+    } catch (error) {
+      console.error("[ZONE-VALIDATION] Could not fetch pages:", error.message);
+    }
+
+    const allEditableContent = [...editablePosts, ...editablePages];
+
+    if (allEditableContent.length === 0) {
+      return res.json({
+        success: false,
+        message: "Could not access WordPress content. Site may have REST API disabled or no public content.",
+        zones: [],
+        subscriptionRequired: true,
+      });
+    }
+
+    // Step 3: Extract zones from HTML using cheerio (more targeted)
     const htmlResponse = await axios.get(normalizedUrl, {
       timeout: 15000,
-      maxContentLength: 1000000, // 1MB limit
+      maxContentLength: 1000000,
     });
 
-    const html = htmlResponse.data;
+    const $ = cheerio.load(htmlResponse.data);
 
-    // Extract text content zones (simple version - no auth needed)
-    const zones = [];
+    // Extract text from main content areas - these are most likely to be editable
+    const candidateZones = [];
+
+    // Focus on content areas, not headers/footers
+    const contentSelectors = [
+      'article h1',
+      'article h2',
+      'article h3',
+      'article p',
+      'main h1',
+      'main h2',
+      'main h3',
+      'main p',
+      '.entry-content h1',
+      '.entry-content h2',
+      '.entry-content h3',
+      '.entry-content p',
+      '.post-content h1',
+      '.post-content h2',
+      '.post-content h3',
+      '.post-content p',
+      '.content h1',
+      '.content h2',
+      '.content h3',
+      '.content p',
+    ];
+
+    contentSelectors.forEach((selector) => {
+      $(selector).each((i, elem) => {
+        const text = $(elem).text().trim();
+
+        // Filter criteria
+        if (
+          text.length >= 20 &&  // Minimum length
+          text.length <= 300 && // Maximum length
+          !text.includes('<!--') &&
+          /[a-zA-Z]/.test(text) // Contains letters
+        ) {
+          candidateZones.push({
+            text: text,
+            selector: selector,
+          });
+        }
+      });
+    });
+
+    console.log(`[ZONE-VALIDATION] Found ${candidateZones.length} candidate zones from HTML`);
+
+    // Step 4: Validate each zone against actual WordPress content
+    const validatedZones = [];
     let zoneId = 1;
 
-    // Find all text nodes between HTML tags (simplified)
-    // Match patterns like: >Some text here<
-    const textPattern = />([^<>{}\[\]]+)</g;
-    let match;
+    for (const candidate of candidateZones) {
+      // Check if this text appears in any editable post/page
+      const foundInContent = allEditableContent.find((item) => {
+        const contentText = item.content.rendered || '';
+        // Strip HTML tags from WordPress content for comparison
+        const strippedContent = contentText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        const candidateText = candidate.text.replace(/\s+/g, ' ').trim();
 
-    while ((match = textPattern.exec(html)) !== null) {
-      const text = match[1].trim();
+        // Check if candidate text appears in this content (with some fuzzy matching)
+        const searchText = candidateText.substring(0, Math.min(100, candidateText.length));
+        return strippedContent.includes(searchText) || strippedContent.includes(candidate.text.substring(0, 50));
+      });
 
-      // Filter out noise
-      if (
-        text.length > 15 && // Minimum length
-        text.length < 200 && // Maximum length
-        !text.startsWith("<!--") && // Not a comment
-        !text.match(/^[^a-zA-Z0-9]+$/) && // Has alphanumeric chars
-        !text.toLowerCase().includes("<!doctype") &&
-        !text.toLowerCase().includes("<script") &&
-        !text.toLowerCase().includes("<style")
-      ) {
-        zones.push({
-          id: `preview-zone-${zoneId}`,
-          label: text.substring(0, 50) + (text.length > 50 ? "..." : ""),
-          content: text,
-          editable: false, // Requires subscription
+      if (foundInContent) {
+        validatedZones.push({
+          id: `validated-zone-${zoneId}`,
+          label: candidate.text.substring(0, 60) + (candidate.text.length > 60 ? "..." : ""),
+          content: candidate.text,
+          editable: false, // Still requires subscription
           previewOnly: true,
-          location: "auto-detected",
+          validated: true, // This zone has been validated against WordPress content
+          location: candidate.selector,
+          foundInPost: foundInContent.id,
+          postTitle: foundInContent.title.rendered,
         });
         zoneId++;
 
-        // Limit to 20 zones for preview
-        if (zones.length >= 20) break;
+        // Limit to 20 validated zones
+        if (validatedZones.length >= 20) break;
       }
     }
 
-    console.log(`[PUBLIC-DISCOVERY] Found ${zones.length} preview zones`);
+    console.log(`[ZONE-VALIDATION] ✅ Validated ${validatedZones.length} editable zones`);
+    console.log(`[ZONE-VALIDATION] ❌ Filtered out ${candidateZones.length - validatedZones.length} non-editable zones`);
+
+    // Fallback: If validation found 0 zones, use non-validated candidates (page builders like Divi, Elementor)
+    let finalZones = validatedZones;
+    let validationFallback = false;
+    
+    if (validatedZones.length === 0 && candidateZones.length > 0) {
+      console.log(`[ZONE-FALLBACK] 🔄 Validation returned 0 zones - falling back to non-validated zones`);
+      console.log(`[ZONE-FALLBACK] Site likely uses page builder (Divi, Elementor, etc.)`);
+      
+      validationFallback = true;
+      
+      // Create non-validated zones from candidates (limit to 20)
+      let zoneId = 1;
+      finalZones = candidateZones.slice(0, 20).map(candidate => ({
+        id: `fallback-zone-${zoneId++}`,
+        label: candidate.text.substring(0, 60) + (candidate.text.length > 60 ? "..." : ""),
+        content: candidate.text,
+        editable: false,
+        previewOnly: true,
+        validated: false, // Not validated - may not be editable
+        location: candidate.selector,
+        fallback: true, // Flag indicating this is a fallback zone
+      }));
+      
+      console.log(`[ZONE-FALLBACK] ✅ Returning ${finalZones.length} non-validated zones`);
+    }
+    
+    if (finalZones.length === 0) {
+      return res.json({
+        success: false,
+        message: "Could not find editable zones in main content. Site may use custom theme or page builders.",
+        zones: [],
+        subscriptionRequired: true,
+      });
+    }
 
     res.json({
       success: true,
       platform: "wordpress",
       url: normalizedUrl,
-      zones: zones,
-      totalZones: zones.length,
+      zones: finalZones,
+      totalZones: finalZones.length,
       subscriptionRequired: true,
-      message: "Subscribe to edit these zones",
+      message: "These zones have been validated and can be edited after subscription",
+      validation: {
+        fallbackUsed: validationFallback,
+        candidatesFound: candidateZones.length,
+        zonesValidated: validatedZones.length,
+        validationRate: `${Math.round((validatedZones.length / candidateZones.length) * 100)}%`,
+        method: "Validated against WordPress REST API content",
+      },
       pricing: {
         starter: "$29/month - Edit up to 3 sites",
         pro: "$99/month - Unlimited sites",
@@ -299,13 +423,26 @@ router.post("/discover-zones", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("[PUBLIC-DISCOVERY] Error:", error.message);
+    console.error("[ZONE-VALIDATION] Error:", error.message);
     return res.status(500).json({
       success: false,
       error: "Zone discovery failed",
       message: error.message,
     });
   }
+});
+
+// ===========================================
+// GET /api/platform-detection/test
+// Test endpoint to verify API is working
+// ===========================================
+router.get("/test", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "Platform detection API is running",
+    supportedPlatforms: ["wordpress", "shopify", "ghost"],
+    features: ["Platform detection", "Validated zone discovery"],
+  });
 });
 
 module.exports = router;

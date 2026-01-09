@@ -257,6 +257,41 @@ const linkRewriteScript = `
             // Click handler
             document.addEventListener('click', function(e) {
               const target = e.target;
+
+              // Check if clicking on an image first
+              if (target.tagName === 'IMG') {
+                e.preventDefault();
+                e.stopPropagation();
+
+                const cssSelector = getCssSelector(target);
+                const imgSrc = target.src;
+                const imgWidth = target.naturalWidth || target.width;
+                const imgHeight = target.naturalHeight || target.height;
+                const imgAlt = target.alt || '';
+
+                console.log('[SafeWebEdit] Image clicked:', {
+                  src: imgSrc,
+                  width: imgWidth,
+                  height: imgHeight,
+                  selector: cssSelector
+                });
+
+                // Send IMAGE_CLICKED message to parent window
+                window.parent.postMessage({
+                  type: 'IMAGE_CLICKED',
+                  data: {
+                    cssSelector: cssSelector,
+                    src: imgSrc,
+                    width: imgWidth,
+                    height: imgHeight,
+                    alt: imgAlt
+                  }
+                }, '*');
+
+                return;
+              }
+
+
               const textElement = getTextElement(target);
 
               if (!textElement) {

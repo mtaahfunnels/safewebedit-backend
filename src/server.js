@@ -35,6 +35,10 @@ const onboardRoutes = require("./api/routes/onboard"); // NEW: Onboarding flow
 const stripeWebhookRoutes = require("./api/routes/stripe-webhook"); // NEW: Stripe webhooks
 const emailRoutes = require("./api/routes/email"); // Email inbound parse webhook
 const platformDetectionRoutes = require("./api/routes/platform-detection"); // NEW: Freemium platform detection
+const imageOverlayRoutes = require("./api/routes/image-overlay"); // NEW: Image overlay feature
+const imageTextReplacementRoutes = require("./api/routes/image-text-replacement"); // NEW: Text replacement in images
+const visualImageCreatorRoutes = require("./api/routes/visual-image-creator"); // NEW: Visual image creator
+const aiImageGenRoutes = require("./api/routes/ai-image-gen"); // NEW: AI image generation
 
 // Initialize Express app
 const app = express();
@@ -149,6 +153,10 @@ app.use("/api", authRoutes);
 app.use("/api/onboard", onboardRoutes);
 // Platform detection routes (public - no auth required for freemium)
 app.use("/api/platform-detection", platformDetectionRoutes);
+app.use("/api/image-overlay", authenticateToken, imageOverlayRoutes);
+app.use("/api/image-text", authenticateToken, imageTextReplacementRoutes);
+app.use("/api/visual-creator", authenticateToken, visualImageCreatorRoutes);
+app.use("/api/ai-image-gen", authenticateToken, aiImageGenRoutes);
 
 // Sites routes (NEW - unified WordPress + Universal)
 app.use("/api/sites", authenticateToken, sitesRoutes);
