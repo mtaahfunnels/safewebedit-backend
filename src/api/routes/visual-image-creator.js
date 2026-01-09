@@ -77,41 +77,48 @@ router.post("/create", async (req, res) => {
 // Save created image to WordPress media library
 // ===========================================
 router.post("/save-to-wordpress", async (req, res) => {
-  const { site_id, image_base64, filename, replace_image_id } = req.body;
+  const { site_id, image_base64, filename, replace_image_url, page_id } = req.body;
+
+  console.log("\n" + "=".repeat(80));
+  console.log("[IMG-SWAP] REQUEST START");
+  console.log("[IMG-SWAP] Time:", new Date().toISOString());
+  console.log("[IMG-SWAP] site_id:", site_id);
+  console.log("[IMG-SWAP] page_id:", page_id);
+  console.log("[IMG-SWAP] replace_url:", replace_image_url);
+  console.log("[IMG-SWAP] image_size:", image_base64 ? image_base64.length : 0);
 
   if (!site_id || !image_base64) {
-    return res.status(400).json({
-      error: "site_id and image_base64 are required"
-    });
+    console.error("[IMG-SWAP] FAIL: Missing parameters");
+    return res.status(400).json({ error: "site_id and image_base64 required" });
   }
 
   try {
-    console.log("[VISUAL-CREATOR] Saving to WordPress...");
-
-    // Get site credentials
+    console.log("[IMG-SWAP] [1/5] Fetching site...");
     const siteResult = await query(
       "SELECT site_url, wp_username, wp_app_password_encrypted FROM wordpress_sites WHERE id = $1",
       [site_id]
     );
 
     if (siteResult.rows.length === 0) {
+      console.error("[IMG-SWAP] FAIL: Site not found");
       return res.status(404).json({ error: "Site not found" });
     }
 
     const { site_url, wp_username, wp_app_password_encrypted } = siteResult.rows[0];
+    console.log("[IMG-SWAP] OK: Site =", site_url);
 
-    // Decrypt password
+    console.log("[IMG-SWAP] [2/5] Preparing auth...");
     const wp_password = Buffer.from(wp_app_password_encrypted, 'base64').toString('utf-8');
     const authHeader = Buffer.from(`${wp_username}:${wp_password}`).toString('base64');
+    console.log("[IMG-SWAP] OK: Auth ready");
 
-    // Convert base64 to buffer
+    console.log("[IMG-SWAP] [3/5] Uploading image...");
     const imageData = image_base64.replace(/^data:image\/\w+;base64,/, '');
     const imageBuffer = Buffer.from(imageData, 'base64');
 
-    // Upload to WordPress
     const form = new FormData();
     form.append('file', imageBuffer, {
-      filename: filename || `created-${Date.now()}.png`,
+      filename: filename || `ai-${Date.now()}.png`,
       contentType: 'image/png'
     });
 
@@ -129,38 +136,102 @@ router.post("/save-to-wordpress", async (req, res) => {
     );
 
     const newMedia = uploadResponse.data;
+    console.log("[IMG-SWAP] OK: Upload complete");
+    console.log("[IMG-SWAP]   ID:", newMedia.id);
+    console.log("[IMG-SWAP]   URL:", newMedia.source_url);
 
-    console.log("[VISUAL-CREATOR] Image uploaded:", newMedia.id);
-
-    // If replacing an existing image, update all references
     let replacedIn = [];
-    if (replace_image_id) {
-      console.log("[VISUAL-CREATOR] Replacing image ID:", replace_image_id);
-      // This would require finding and updating all posts/pages using the old image
-      // For now, just return the new image info
+    if (replace_image_url && page_id) {
+      console.log("[IMG-SWAP] [4/5] Replacing in content...");
+      console.log("[IMG-SWAP]   Page:", page_id);
+      console.log("[IMG-SWAP]   Find:", replace_image_url);
+      console.log("[IMG-SWAP]   Replace with:", newMedia.source_url);
+
+      try {
+        const pageResp = await axios.get(
+          `${site_url}/wp-json/wp/v2/pages/${page_id}?context=edit`,
+          {
+            headers: { 'Authorization': `Basic ${authHeader}` },
+            timeout: 30000
+          }
+        );
+
+        const rawContent = pageResp.data.content.raw || pageResp.data.content.rendered;
+        console.log("[IMG-SWAP] OK: Page fetched, length:", rawContent.length);
+
+        const urlExists = rawContent.includes(replace_image_url);
+        console.log("[IMG-SWAP]   URL exists in content:", urlExists);
+
+        if (!urlExists) {
+          console.warn("[IMG-SWAP] WARN: URL not found!");
+          console.warn("[IMG-SWAP]   Preview:", rawContent.substring(0, 200));
+        }
+
+        const updatedContent = rawContent.split(replace_image_url).join(newMedia.source_url);
+        const changed = rawContent !== updatedContent;
+        console.log("[IMG-SWAP]   Changed:", changed);
+
+        if (changed) {
+          console.log("[IMG-SWAP] [5/5] Saving to WordPress...");
+          const updateResp = await axios.post(
+            `${site_url}/wp-json/wp/v2/pages/${page_id}`,
+            { content: updatedContent },
+            {
+              headers: {
+                'Authorization': `Basic ${authHeader}`,
+                'Content-Type': 'application/json'
+              },
+              timeout: 30000
+            }
+          );
+
+          console.log("[IMG-SWAP] OK: Saved! Modified:", updateResp.data.modified);
+          replacedIn.push({
+            page_id: page_id,
+            old_url: replace_image_url,
+            new_url: newMedia.source_url
+          });
+        } else {
+          console.warn("[IMG-SWAP] WARN: No replacement made");
+        }
+      } catch (err) {
+        console.error("[IMG-SWAP] ERROR in replacement:", err.message);
+        if (err.response) {
+          console.error("[IMG-SWAP]   Status:", err.response.status);
+          console.error("[IMG-SWAP]   Data:", err.response.data);
+        }
+      }
     }
+
+    console.log("[IMG-SWAP] SUCCESS");
+    console.log("=".repeat(80) + "\n");
 
     res.json({
       success: true,
       new_image: {
         id: newMedia.id,
         url: newMedia.source_url,
-        title: newMedia.title?.rendered,
-        link: newMedia.link
+        title: newMedia.title?.rendered
       },
       replaced_in: replacedIn,
-      message: "Image uploaded successfully"
+      message: replacedIn.length > 0 ? "Replaced" : "Uploaded only"
     });
 
   } catch (error) {
-    console.error("[VISUAL-CREATOR] Save error:", error.message);
-    return res.status(500).json({
+    console.error("[IMG-SWAP] FATAL ERROR");
+    console.error("[IMG-SWAP]   Message:", error.message);
+    if (error.response) {
+      console.error("[IMG-SWAP]   Status:", error.response.status);
+      console.error("[IMG-SWAP]   Data:", error.response.data);
+    }
+    console.error("=".repeat(80) + "\n");
+
+    res.status(500).json({
       success: false,
-      error: "Failed to save to WordPress",
-      message: error.message
+      error: error.message
     });
   }
-});
+})
 
 // ===========================================
 // GET /api/visual-creator/templates
@@ -409,3 +480,164 @@ router.get("/test", (req, res) => {
 });
 
 module.exports = router;
+
+// ===========================================
+// DIAGNOSTIC ENDPOINT: Test each step
+// ===========================================
+router.post("/diagnose-swap", async (req, res) => {
+  const { site_id, page_id, replace_image_url } = req.body;
+
+  const diagnostics = {
+    timestamp: new Date().toISOString(),
+    steps: [],
+    success: false,
+    error: null
+  };
+
+  try {
+    // STEP 1: Validate inputs
+    diagnostics.steps.push({
+      step: 1,
+      name: "Validate Inputs",
+      status: "checking",
+      data: { site_id, page_id, replace_image_url }
+    });
+
+    if (!site_id || !page_id || !replace_image_url) {
+      diagnostics.steps[0].status = "failed";
+      diagnostics.steps[0].error = "Missing required parameters";
+      return res.json(diagnostics);
+    }
+    diagnostics.steps[0].status = "passed";
+
+    // STEP 2: Get site credentials
+    diagnostics.steps.push({
+      step: 2,
+      name: "Fetch Site Credentials",
+      status: "checking"
+    });
+
+    const siteResult = await query(
+      "SELECT site_url, wp_username, wp_app_password_encrypted FROM wordpress_sites WHERE id = $1",
+      [site_id]
+    );
+
+    if (siteResult.rows.length === 0) {
+      diagnostics.steps[1].status = "failed";
+      diagnostics.steps[1].error = "Site not found in database";
+      return res.json(diagnostics);
+    }
+
+    const { site_url, wp_username, wp_app_password_encrypted } = siteResult.rows[0];
+    diagnostics.steps[1].status = "passed";
+    diagnostics.steps[1].data = { site_url, wp_username };
+
+    // STEP 3: Test WordPress authentication
+    diagnostics.steps.push({
+      step: 3,
+      name: "Test WordPress API Authentication",
+      status: "checking"
+    });
+
+    const wp_password = Buffer.from(wp_app_password_encrypted, 'base64').toString('utf-8');
+    const authHeader = Buffer.from(`${wp_username}:${wp_password}`).toString('base64');
+
+    try {
+      const authTest = await axios.get(
+        `${site_url}/wp-json/wp/v2/pages/${page_id}?context=edit`,
+        {
+          headers: { 'Authorization': `Basic ${authHeader}` },
+          timeout: 10000
+        }
+      );
+      diagnostics.steps[2].status = "passed";
+      diagnostics.steps[2].data = {
+        page_title: authTest.data.title?.rendered,
+        page_status: authTest.data.status
+      };
+    } catch (authError) {
+      diagnostics.steps[2].status = "failed";
+      diagnostics.steps[2].error = authError.message;
+      diagnostics.steps[2].details = authError.response?.data;
+      return res.json(diagnostics);
+    }
+
+    // STEP 4: Fetch current page content
+    diagnostics.steps.push({
+      step: 4,
+      name: "Fetch Current Page Content",
+      status: "checking"
+    });
+
+    const pageResponse = await axios.get(
+      `${site_url}/wp-json/wp/v2/pages/${page_id}`,
+      {
+        headers: { 'Authorization': `Basic ${authHeader}` },
+        timeout: 30000
+      }
+    );
+
+    const currentContent = pageResponse.data.content.rendered;
+    diagnostics.steps[3].status = "passed";
+    diagnostics.steps[3].data = {
+      content_length: currentContent.length,
+      content_preview: currentContent.substring(0, 200) + "...",
+      contains_target_url: currentContent.includes(replace_image_url)
+    };
+
+    // STEP 5: Check if target image URL exists in content
+    diagnostics.steps.push({
+      step: 5,
+      name: "Verify Target Image in Content",
+      status: "checking"
+    });
+
+    if (!currentContent.includes(replace_image_url)) {
+      diagnostics.steps[4].status = "warning";
+      diagnostics.steps[4].error = "Target image URL not found in page content";
+      diagnostics.steps[4].data = {
+        searched_for: replace_image_url,
+        suggestion: "The image might be in a different format or the URL might have changed"
+      };
+
+      // Try to find similar URLs
+      const imgMatches = currentContent.match(/src="([^"]*\.(?:jpg|jpeg|png|gif|webp))"/gi);
+      if (imgMatches) {
+        diagnostics.steps[4].data.found_images = imgMatches.slice(0, 5);
+      }
+    } else {
+      diagnostics.steps[4].status = "passed";
+      const occurrences = currentContent.split(replace_image_url).length - 1;
+      diagnostics.steps[4].data = {
+        occurrences: occurrences,
+        message: `Found ${occurrences} occurrence(s) of target URL`
+      };
+    }
+
+    // STEP 6: Simulate content replacement
+    diagnostics.steps.push({
+      step: 6,
+      name: "Simulate Content Replacement",
+      status: "checking"
+    });
+
+    const testNewUrl = "https://example.com/test-new-image.png";
+    const simulatedContent = currentContent.split(replace_image_url).join(testNewUrl);
+
+    diagnostics.steps[5].status = "passed";
+    diagnostics.steps[5].data = {
+      original_length: currentContent.length,
+      new_length: simulatedContent.length,
+      changed: currentContent !== simulatedContent,
+      preview: simulatedContent.substring(0, 200) + "..."
+    };
+
+    diagnostics.success = true;
+    res.json(diagnostics);
+
+  } catch (error) {
+    diagnostics.error = error.message;
+    diagnostics.stack = error.stack;
+    res.status(500).json(diagnostics);
+  }
+});
