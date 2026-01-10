@@ -42,7 +42,7 @@ router.post("/detect", async (req, res) => {
     // 1. Check for WordPress
     try {
       const wpResponse = await axios.get(`${normalizedUrl}/wp-json`, {
-        timeout: 10000,
+        timeout: 30000,  // Increased to 30s for slow sites
         validateStatus: (status) => status < 500,
       });
 
@@ -117,7 +117,7 @@ router.post("/detect", async (req, res) => {
     // 4. Check HTML source for clues
     try {
       const htmlResponse = await axios.get(normalizedUrl, {
-        timeout: 10000,
+        timeout: 20000,  // Increased to 20s for slow sites
         maxContentLength: 500000, // 500KB limit
       });
 
@@ -170,10 +170,22 @@ router.post("/detect", async (req, res) => {
 
     } catch (htmlError) {
       console.error("[PLATFORM-DETECTION] HTML analysis failed:", htmlError.message);
-      results.details = {
-        error: "Could not analyze website",
-        message: htmlError.message,
-      };
+      
+      // Check if it's a timeout - provide better message
+      if (htmlError.message.includes('timeout')) {
+        results.platform = "unknown";
+        results.canEdit = false;
+        results.details = {
+          error: "Site is very slow or temporarily unavailable",
+          message: "This website took too long to respond. It may be experiencing high traffic or technical issues. Please try again in a few minutes.",
+          suggestion: "If this persists, the site owner may need to check their hosting.",
+        };
+      } else {
+        results.details = {
+          error: "Could not analyze website",
+          message: htmlError.message,
+        };
+      }
     }
 
     return res.json(results);
@@ -272,15 +284,17 @@ router.post("/discover-zones", async (req, res) => {
     }
 
     // Step 3: Extract zones from HTML using cheerio (more targeted)
-    const htmlResponse = await axios.get(normalizedUrl, {
-      timeout: 15000,
-      maxContentLength: 1000000,
-    });
+    let candidateZones = [];
+    
+    try {
+      const htmlResponse = await axios.get(normalizedUrl, {
+        timeout: 20000,  // Increased from 15s to 20s for slow sites
+        maxContentLength: 1000000,
+      });
 
-    const $ = cheerio.load(htmlResponse.data);
+      const $ = cheerio.load(htmlResponse.data);
 
-    // Extract text from main content areas - these are most likely to be editable
-    const candidateZones = [];
+      // Extract text from main content areas - these are most likely to be editable
 
     // Focus on content areas, not headers/footers
     const contentSelectors = [
@@ -325,6 +339,24 @@ router.post("/discover-zones", async (req, res) => {
       });
     });
 
+    } catch (htmlError) {
+      console.log("[ZONE-VALIDATION] HTML fetch failed:", htmlError.message);
+      console.log("[ZONE-VALIDATION] Returning post/page count instead of specific zones");
+      
+      // Return success with posts/pages info even if HTML fetch failed
+      return res.json({
+        success: true,
+        platform: "wordpress",
+        canEdit: true,
+        siteName: platformData.siteName,
+        message: `This WordPress site has ${editablePosts.length} posts and ${editablePages.length} pages available to edit.`,
+        zones: [],
+        zoneCount: editablePosts.length + editablePages.length,
+        subscriptionRequired: true,
+        htmlFetchFailed: true,
+      });
+    }
+    
     console.log(`[ZONE-VALIDATION] Found ${candidateZones.length} candidate zones from HTML`);
 
     // Step 4: Validate each zone against actual WordPress content

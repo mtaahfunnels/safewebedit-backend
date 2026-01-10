@@ -77,7 +77,7 @@ router.post("/create", async (req, res) => {
 // Save created image to WordPress media library
 // ===========================================
 router.post("/save-to-wordpress", async (req, res) => {
-  const { site_id, image_base64, filename, replace_image_url, page_id } = req.body;
+  const { site_id, image_base64, filename, replace_image_url, page_id, target_width, target_height } = req.body;
 
   console.log("\n" + "=".repeat(80));
   console.log("[IMG-SWAP] REQUEST START");
@@ -116,8 +116,28 @@ router.post("/save-to-wordpress", async (req, res) => {
     const imageData = image_base64.replace(/^data:image\/\w+;base64,/, '');
     const imageBuffer = Buffer.from(imageData, 'base64');
 
+    // Auto-resize image if target dimensions provided
+    let finalImageBuffer = imageBuffer;
+    if (target_width && target_height) {
+      console.log("[IMG-SWAP]   Auto-resize: Target dimensions", target_width, "x", target_height);
+      try {
+        finalImageBuffer = await sharp(imageBuffer)
+          .resize(target_width, target_height, {
+            fit: 'cover',        // Crop to fill exact dimensions
+            position: 'center'   // Center crop
+          })
+          .png()                 // Convert to PNG
+          .toBuffer();
+        console.log("[IMG-SWAP]   Auto-resize: ✓ Complete");
+      } catch (resizeErr) {
+        console.log("[IMG-SWAP]   Auto-resize: Failed, using original", resizeErr.message);
+        // Continue with original if resize fails
+      }
+    }
+
+
     const form = new FormData();
-    form.append('file', imageBuffer, {
+    form.append('file', finalImageBuffer, {
       filename: filename || `ai-${Date.now()}.png`,
       contentType: 'image/png'
     });
