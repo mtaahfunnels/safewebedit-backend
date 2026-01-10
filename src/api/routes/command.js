@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../../services/database');
+const creditService = require('../../services/creditService');
 const axios = require('axios');
 
 router.post('/', async (req, res) => {
@@ -32,17 +33,45 @@ router.post('/', async (req, res) => {
 
     console.log('[COMMAND] Found', zones.length, 'zones');
 
+    // Check credits (1 credit needed for text edit via command)
+    const user_id = zones[0].user_id;
+    console.log('[COMMAND] Checking credits for user:', user_id);
+    const hasEnoughCredits = await creditService.hasCredits(user_id, 1);
+    const currentBalance = await creditService.getBalance(user_id);
+    console.log('[COMMAND] Current balance:', currentBalance);
+
+    if (!hasEnoughCredits) {
+      console.error('[COMMAND] FAIL: Insufficient credits');
+      console.error('[COMMAND]   Required: 1, Available:', currentBalance);
+      return res.status(402).json({
+        success: false,
+        error: 'Insufficient credits',
+        required: 1,
+        available: currentBalance,
+        message: 'You need 1 credit to edit text. Please purchase more credits.'
+      });
+    }
+    console.log('[COMMAND] OK: Credits sufficient');
+
     const parsedCommand = parseCommand(command, zones);
     if (!parsedCommand.valid) {
       return res.status(400).json({ success: false, message: parsedCommand.error });
     }
 
     const updateResult = await executeUpdate(parsedCommand);
+
+    // Deduct 1 credit for text edit
+    const newBalance = await creditService.useCredits(user_id, 1, 'AI Command: ' + command.substring(0, 50));
+    console.log('[COMMAND] Deducted 1 credit, new balance:', newBalance);
     
     res.json({
       success: true,
       message: updateResult.message,
-      changes: updateResult.changes
+      changes: updateResult.changes,
+      credits: {
+        used: 1,
+        balance: newBalance
+      }
     });
 
   } catch (error) {

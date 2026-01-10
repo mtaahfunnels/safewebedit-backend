@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../../services/database');
+const creditService = require('../../services/creditService');
 const emailService = require('../../services/emailService');
 const KcAdminClient = require('@keycloak/keycloak-admin-client').default;
 
@@ -88,6 +89,14 @@ router.post('/webhook', async (req, res) => {
 async function handleCheckoutCompleted(session) {
   console.log('[Stripe Webhook] Checkout completed:', session.id);
 
+  // Check if this is a credit purchase or subscription
+  if (session.metadata && session.metadata.credits) {
+    // This is a credit purchase
+    await handleCreditPurchase(session);
+    return;
+  }
+
+  // Otherwise, handle as subscription/onboarding
   const organizationId = session.client_reference_id || session.metadata.organization_id;
 
   if (!organizationId) {
@@ -326,6 +335,50 @@ async function handleSubscriptionDeleted(subscription) {
      WHERE stripe_subscription_id = $2`,
     ['canceled', subscription.id]
   );
+}
+
+
+/**
+ * Handle credit purchase completion
+ */
+async function handleCreditPurchase(session) {
+  console.log('[Stripe Webhook] Processing credit purchase');
+
+  const user_id = session.metadata.user_id;
+  const credits = parseInt(session.metadata.credits);
+  const package_id = session.metadata.package_id;
+  const amount_paid = session.amount_total / 100;
+
+  console.log('[Stripe Webhook] Credit purchase details:', {
+    user_id,
+    credits,
+    package_id,
+    amount_paid
+  });
+
+  if (!user_id || !credits) {
+    console.error('[Stripe Webhook] Missing user_id or credits in metadata');
+    return;
+  }
+
+  try {
+    // Add credits to user account
+    const newBalance = await creditService.addCredits(
+      user_id,
+      credits,
+      `Purchased ${package_id} pack - ${credits} credits`
+    );
+
+    console.log('[Stripe Webhook] Credits added successfully:', {
+      user_id,
+      credits_added: credits,
+      new_balance: newBalance
+    });
+
+  } catch (error) {
+    console.error('[Stripe Webhook] Failed to add credits:', error.message);
+    throw error;
+  }
 }
 
 module.exports = router;

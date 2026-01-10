@@ -14,7 +14,8 @@ const { v4: uuidv4 } = require('uuid');
 // Import database
 const db = require('./services/database');
 
-const { router: authRoutes, trackActivity } = require("./api/routes/auth");
+// Import routes
+const authRoutes = require('./api/routes/auth');
 const { authenticateToken } = require("./api/routes/auth");
 const wordpressRoutes = require("./api/routes/wordpress");
 const shopifyRoutes = require("./api/routes/shopify");
@@ -153,17 +154,17 @@ app.use("/api", authRoutes);
 app.use("/api/onboard", onboardRoutes);
 // Platform detection routes (public - no auth required for freemium)
 app.use("/api/platform-detection", platformDetectionRoutes);
-app.use("/api/image-overlay", authenticateToken, trackActivity, imageOverlayRoutes);
+app.use("/api/image-overlay", authenticateToken, imageOverlayRoutes);
 app.use("/api/image-text", authenticateToken, imageTextReplacementRoutes);
 app.use("/api/visual-creator", authenticateToken, visualImageCreatorRoutes);
 app.use("/api/ai-image-gen", authenticateToken, aiImageGenRoutes);
-app.use("/api/credits", authenticateToken, trackActivity, creditsRoutes);
+app.use("/api/credits", authenticateToken, creditsRoutes);
 
 // Sites routes (NEW - unified WordPress + Universal)
-app.use("/api/sites", authenticateToken, trackActivity, sitesRoutes);
+app.use("/api/sites", authenticateToken, sitesRoutes);
 
 // WordPress routes (legacy - kept for backwards compatibility)
-app.use("/api/wordpress", authenticateToken, trackActivity, wordpressRoutes);
+app.use("/api/wordpress", authenticateToken, wordpressRoutes);
 app.use("/api/shopify", shopifyRoutes);
 app.use("/api/ghost", ghostRoutes);
 
@@ -171,13 +172,13 @@ app.use("/api/ghost", ghostRoutes);
 app.use("/api/slots", authenticateToken, slotsRoutes);
 app.use("/api/content-editor", authenticateToken, contentEditorRoutes);
 app.use("/api/visual-proxy", visualProxyRoutes); // No auth required for proxy
-app.use("/api/visual-editor", authenticateToken, trackActivity, visualEditorRoutes);
+app.use("/api/visual-editor", authenticateToken, visualEditorRoutes);
 app.use("/api/auto-discovery", authenticateToken, autoDiscoveryRoutes);
-app.use("/api/content", authenticateToken, trackActivity, contentRoutes);
-app.use("/api/command", authenticateToken, trackActivity, commandRoutes);
+app.use("/api/content", authenticateToken, contentRoutes);
+app.use("/api/command", authenticateToken, commandRoutes);
 
 // Subscription routes
-app.use("/api/subscription", authenticateToken, trackActivity, subscriptionRoutes);
+app.use("/api/subscription", authenticateToken, subscriptionRoutes);
 
 // Password reset routes
 app.use("/api/password-reset", passwordResetRoutes);

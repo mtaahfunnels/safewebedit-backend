@@ -5,6 +5,7 @@ const sharp = require("sharp");
 const FormData = require("form-data");
 const axios = require("axios");
 const { query } = require("../../services/database");
+const creditService = require("../../services/creditService");
 
 /**
  * Visual Image Creator API
@@ -95,7 +96,7 @@ router.post("/save-to-wordpress", async (req, res) => {
   try {
     console.log("[IMG-SWAP] [1/5] Fetching site...");
     const siteResult = await query(
-      "SELECT site_url, wp_username, wp_app_password_encrypted FROM wordpress_sites WHERE id = $1",
+      "SELECT site_url, wp_username, wp_app_password_encrypted, user_id FROM wordpress_sites WHERE id = $1",
       [site_id]
     );
 
@@ -104,8 +105,25 @@ router.post("/save-to-wordpress", async (req, res) => {
       return res.status(404).json({ error: "Site not found" });
     }
 
-    const { site_url, wp_username, wp_app_password_encrypted } = siteResult.rows[0];
+    const { site_url, wp_username, wp_app_password_encrypted, user_id } = siteResult.rows[0];
     console.log("[IMG-SWAP] OK: Site =", site_url);
+    // Check credits (2 credits needed for image swap)
+    console.log("[IMG-SWAP]   Checking credits for user:", user_id);
+    const hasEnoughCredits = await creditService.hasCredits(user_id, 2);
+    const currentBalance = await creditService.getBalance(user_id);
+    console.log("[IMG-SWAP]   Current balance:", currentBalance);
+
+    if (!hasEnoughCredits) {
+      console.error("[IMG-SWAP] FAIL: Insufficient credits");
+      console.error("[IMG-SWAP]   Required: 2, Available:", currentBalance);
+      return res.status(402).json({
+        error: "Insufficient credits",
+        required: 2,
+        available: currentBalance,
+        message: "You need 2 credits to swap an image. Please purchase more credits."
+      });
+    }
+    console.log("[IMG-SWAP] OK: Credits sufficient");
 
     console.log("[IMG-SWAP] [2/5] Preparing auth...");
     const wp_password = Buffer.from(wp_app_password_encrypted, 'base64').toString('utf-8');
@@ -224,6 +242,10 @@ router.post("/save-to-wordpress", async (req, res) => {
     }
 
     console.log("[IMG-SWAP] SUCCESS");
+    // Deduct 2 credits for image swap
+    const swapReason = replacedIn.length > 0 ? 'Image swap' : 'Image upload';
+    const newBalance = await creditService.useCredits(user_id, 2, swapReason);
+    console.log("[IMG-SWAP]   Deducted 2 credits, new balance:", newBalance);
     console.log("=".repeat(80) + "\n");
 
     res.json({
@@ -234,6 +256,10 @@ router.post("/save-to-wordpress", async (req, res) => {
         title: newMedia.title?.rendered
       },
       replaced_in: replacedIn,
+      credits: {
+        used: 2,
+        balance: newBalance
+      },
       message: replacedIn.length > 0 ? "Replaced" : "Uploaded only"
     });
 
