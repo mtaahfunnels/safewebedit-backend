@@ -176,7 +176,8 @@ router.post('/scan', async (req, res) => {
 // ===========================================
 router.post('/create-slot', async (req, res) => {
   const { organizationId } = req;
-  const { siteId, cssSelector, content, pageId, pageTitle, elementText, pageUrl } = req.body;
+  const { siteId: siteIdCamel, site_id, cssSelector, content, pageId, pageTitle, elementText, pageUrl } = req.body;
+  const siteId = siteIdCamel || site_id; // Accept both formats
 
   if (!siteId || !cssSelector) {
     return res.status(400).json({ error: 'Site ID and CSS selector required' });
