@@ -176,12 +176,35 @@ router.post('/scan', async (req, res) => {
 // ===========================================
 router.post('/create-slot', async (req, res) => {
   const { organizationId } = req;
-  const { siteId: siteIdCamel, site_id, cssSelector, content, pageId, pageTitle, elementText, pageUrl } = req.body;
+  
+  // DIAGNOSTIC: Log raw request body
+  console.log('[AUTO-DISCOVERY] 🔍 create-slot called');
+  console.log('[AUTO-DISCOVERY]   organizationId:', organizationId);
+  console.log('[AUTO-DISCOVERY]   req.body:', JSON.stringify(req.body, null, 2));
+  
+  const { siteId: siteIdCamel, site_id, cssSelector, css_selector, content, pageId, pageTitle, elementText, pageUrl } = req.body;
   const siteId = siteIdCamel || site_id; // Accept both formats
+  const selector = cssSelector || css_selector; // Accept both formats
 
-  if (!siteId || !cssSelector) {
-    return res.status(400).json({ error: 'Site ID and CSS selector required' });
+  console.log('[AUTO-DISCOVERY]   Parsed siteId:', siteId);
+  console.log('[AUTO-DISCOVERY]   Parsed cssSelector:', selector);
+
+  if (!siteId || !selector) {
+    console.error('[AUTO-DISCOVERY] ❌ Validation failed:');
+    console.error('[AUTO-DISCOVERY]   siteId:', siteId, '(missing:', !siteId, ')');
+    console.error('[AUTO-DISCOVERY]   cssSelector:', selector, '(missing:', !selector, ')');
+    return res.status(400).json({ 
+      error: 'Site ID and CSS selector required',
+      debug: {
+        received_siteId: siteId,
+        received_cssSelector: selector,
+        body_keys: Object.keys(req.body)
+      }
+    });
   }
+  
+  // Use selector variable from now on
+  const cssSelector = selector;
 
   try {
     console.log('[AUTO-DISCOVERY] Creating slot for:', { siteId, cssSelector });
