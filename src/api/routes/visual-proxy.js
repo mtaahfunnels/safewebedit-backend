@@ -108,15 +108,29 @@ const linkRewriteScript = `
         '[class*="modal"]:not([class*="cookie"])',
         '[class*="popup"]:not([class*="cookie"])',
         '[class*="overlay"]:not([class*="cookie"])',
+        '[id*="modal"]:not([id*="cookie"])',
+        '[id*="popup"]:not([id*="cookie"])',
+        '[id*="overlay"]:not([id*="cookie"])',
         '.elementor-popup-modal',
         '.om-popup',
-        '.pum-overlay'
+        '.pum-overlay',
+        '.ck_modal',
+        '.mfp-wrap',
+        '.fancybox-overlay',
+        '[role="dialog"]',
+        '[aria-modal="true"]',
+        'div[style*="z-index: 9999"]',
+        'div[style*="position: fixed"]',
+        'div[style*="position: absolute"][style*="z-index"]'
       ];
 
       function injectBlockingCSS() {
         const style = document.createElement('style');
         style.id = 'safewebedit-popup-blocker';
-        style.textContent = POPUP_SELECTORS.join(',') + ' { display: none !important; } body { overflow: auto !important; }';
+        const css = POPUP_SELECTORS.join(', ') + ' { display: none !important; opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; z-index: -9999 !important; } ';
+        css += 'body, html { overflow: auto !important; overflow-x: auto !important; overflow-y: auto !important; position: static !important; } ';
+        css += '.modal-backdrop, .popup-backdrop, .overlay-backdrop, [class*="-backdrop"] { display: none !important; }';
+        style.textContent = css;
         document.head.appendChild(style);
       }
 
@@ -147,9 +161,18 @@ const linkRewriteScript = `
       injectBlockingCSS();
       closePopups();
       watchForPopups();
-      setInterval(closePopups, 2000);
+      
+      // Run aggressively on page load
+      setTimeout(closePopups, 100);
+      setTimeout(closePopups, 500);
+      setTimeout(closePopups, 1000);
+      setTimeout(closePopups, 2000);
+      setTimeout(closePopups, 3000);
+      
+      // Continue checking every 500ms
+      setInterval(closePopups, 500);
 
-      console.log('[POPUP-BLOCKER] Active');
+      console.log('[POPUP-BLOCKER] Active - aggressive mode');
     })();
   </script>
 `;
