@@ -127,7 +127,7 @@ const linkRewriteScript = `
       function injectBlockingCSS() {
         const style = document.createElement('style');
         style.id = 'safewebedit-popup-blocker';
-        const css = POPUP_SELECTORS.join(', ') + ' { display: none !important; opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; z-index: -9999 !important; } ';
+        let css = POPUP_SELECTORS.join(', ') + ' { display: none !important; opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; z-index: -9999 !important; } ';
         css += 'body, html { overflow: auto !important; overflow-x: auto !important; overflow-y: auto !important; position: static !important; } ';
         css += '.modal-backdrop, .popup-backdrop, .overlay-backdrop, [class*="-backdrop"] { display: none !important; }';
         style.textContent = css;
