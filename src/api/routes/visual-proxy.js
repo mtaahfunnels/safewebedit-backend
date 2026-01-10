@@ -100,6 +100,60 @@ const linkRewriteScript = `
   </script>
 `;
 
+    const popupBlockerScript = `  <script>
+    (function() {
+      console.log('[POPUP-BLOCKER] Initializing...');
+
+      const POPUP_SELECTORS = [
+        '[class*="modal"]:not([class*="cookie"])',
+        '[class*="popup"]:not([class*="cookie"])',
+        '[class*="overlay"]:not([class*="cookie"])',
+        '.elementor-popup-modal',
+        '.om-popup',
+        '.pum-overlay'
+      ];
+
+      function injectBlockingCSS() {
+        const style = document.createElement('style');
+        style.id = 'safewebedit-popup-blocker';
+        style.textContent = POPUP_SELECTORS.join(',') + ' { display: none !important; } body { overflow: auto !important; }';
+        document.head.appendChild(style);
+      }
+
+      function closePopups() {
+        POPUP_SELECTORS.forEach(selector => {
+          document.querySelectorAll(selector).forEach(popup => popup.remove());
+        });
+        document.body.style.overflow = 'auto';
+        document.body.classList.remove('modal-open', 'popup-open', 'no-scroll');
+      }
+
+      function watchForPopups() {
+        const observer = new MutationObserver(mutations => {
+          for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+              if (node.nodeType === 1) {
+                const className = node.className || '';
+                if (typeof className === 'string' && (className.includes('modal') || className.includes('popup'))) {
+                  setTimeout(closePopups, 100);
+                }
+              }
+            }
+          }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      }
+
+      injectBlockingCSS();
+      closePopups();
+      watchForPopups();
+      setInterval(closePopups, 2000);
+
+      console.log('[POPUP-BLOCKER] Active');
+    })();
+  </script>
+`;
+
     const clickDetectionScript = `
       <script>
         (function() {
@@ -341,7 +395,7 @@ const linkRewriteScript = `
     `;
 
     // Inject before closing body tag
-    html = html.replace('</body>', linkRewriteScript + clickDetectionScript + '</body>');
+    html = html.replace('</body>', linkRewriteScript + popupBlockerScript + clickDetectionScript + '</body>');
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     // Allow iframe embedding - DO NOT set X-Frame-Options
