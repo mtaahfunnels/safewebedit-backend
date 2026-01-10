@@ -454,8 +454,25 @@ router.put('/update-content', async (req, res) => {
         // Don't append - just return error instead
         return res.status(400).json({
           success: false,
-          error: 'Cannot locate content to replace',
-          message: 'The original content could not be found on the page. Please refresh and try again.'
+          error: 'Cannot edit this element',
+          message: 'This element cannot be edited because it appears to be part of your WordPress theme, plugin, or dynamically generated content (not stored in page content).',
+          help: {
+            canEdit: [
+              'Text in page/post content areas',
+              'Gutenberg block content',
+              'Custom HTML added to pages',
+              'Main content area text'
+            ],
+            cannotEdit: [
+              'Site title and logo (theme header)',
+              'Navigation menus',
+              'Theme headers and footers',
+              'WooCommerce generated content (product loops, coming soon pages)',
+              'Widgets and sidebars',
+              'Plugin-generated elements'
+            ],
+            suggestion: 'Try clicking on text in the main content area of your page, below the header.'
+          }
         });
       }
     } else {
