@@ -96,7 +96,7 @@ router.post("/save-to-wordpress", async (req, res) => {
   try {
     console.log("[IMG-SWAP] [1/5] Fetching site...");
     const siteResult = await query(
-      "SELECT site_url, wp_username, wp_app_password_encrypted, user_id FROM wordpress_sites WHERE id = $1",
+      "SELECT site_url, wp_username, wp_app_password_encrypted, organization_id FROM wordpress_sites WHERE id = $1",
       [site_id]
     );
 
@@ -105,12 +105,12 @@ router.post("/save-to-wordpress", async (req, res) => {
       return res.status(404).json({ error: "Site not found" });
     }
 
-    const { site_url, wp_username, wp_app_password_encrypted, user_id } = siteResult.rows[0];
+    const { site_url, wp_username, wp_app_password_encrypted, organization_id } = siteResult.rows[0];
     console.log("[IMG-SWAP] OK: Site =", site_url);
     // Check credits (2 credits needed for image swap)
-    console.log("[IMG-SWAP]   Checking credits for user:", user_id);
-    const hasEnoughCredits = await creditService.hasCredits(user_id, 2);
-    const currentBalance = await creditService.getBalance(user_id);
+    console.log("[IMG-SWAP]   Checking credits for user:", organization_id);
+    const hasEnoughCredits = await creditService.hasCredits(organization_id, 2);
+    const currentBalance = await creditService.getBalance(organization_id);
     console.log("[IMG-SWAP]   Current balance:", currentBalance);
 
     if (!hasEnoughCredits) {
@@ -244,7 +244,7 @@ router.post("/save-to-wordpress", async (req, res) => {
     console.log("[IMG-SWAP] SUCCESS");
     // Deduct 2 credits for image swap
     const swapReason = replacedIn.length > 0 ? 'Image swap' : 'Image upload';
-    const newBalance = await creditService.useCredits(user_id, 2, swapReason);
+    const newBalance = await creditService.useCredits(organization_id, 2, swapReason);
     console.log("[IMG-SWAP]   Deducted 2 credits, new balance:", newBalance);
     console.log("=".repeat(80) + "\n");
 
